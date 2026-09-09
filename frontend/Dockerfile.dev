@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+
+# Development image: runs the Vite dev server with hot module replacement.
+# Source is bind-mounted by Compose, so only dependencies are baked in here.
+FROM node:22-alpine
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+EXPOSE 5173
+
+# `--host` binds to all interfaces; without it the server is unreachable from
+# outside the container.
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

@@ -1,0 +1,16 @@
+# Normalise line endings in the repository to LF regardless of the platform a
+# contributor works on. Without this, a Windows checkout commits CRLF and every
+# file shows as fully rewritten in diffs.
+* text=auto eol=lf
+
+# Shell scripts and Docker entrypoints must be LF even on Windows checkouts, or
+# the Linux container fails with a confusing "not found" on the shebang line.
+*.sh text eol=lf
+Dockerfile* text eol=lf
+
+# Binary files must never be transformed.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -1,0 +1,105 @@
+# =============================================================================
+# DevPilot - local development stack.
+#
+#   cp .env.example .env && docker compose up --build
+#
+# Services start in dependency order and wait for healthchecks, so the API
+# never boots against a Postgres that is still initialising.
+#
+# This file is for local development: source is bind-mounted and both servers
+# reload on change. Production configuration lives in
+# `docker-compose.prod.yml` (Milestone 12).
+# =============================================================================
+
+services:
+  postgres:
+    # The pgvector image is stock Postgres plus the `vector` extension, which
+    # Milestone 8 needs for semantic code search. Using it from the start
+    # avoids migrating the database image later.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-devpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpilot}
+      POSTGRES_DB: ${POSTGRES_DB:-devpilot}
+    ports:
+      # Exposed so you can attach psql or a GUI client from the host.
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` returns success only once the server accepts connections,
+      # which is later than "the container started".
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devpilot} -d ${POSTGRES_DB:-devpilot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Persist to disk so queued jobs survive a restart of the stack.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Override whatever `.env` says: inside the Compose network the services
+      # are reachable by service name, not on localhost.
+      DEVPILOT_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-devpilot}:${POSTGRES_PASSWORD:-devpilot}@postgres:5432/${POSTGRES_DB:-devpilot}
+      DEVPILOT_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount the source for hot reload. The image still contains a full
+      # copy, so the container also runs correctly without this mount.
+      - ./backend/app:/app/app:ro
+    command:
+      ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      # The browser resolves this, not the Compose network, so it must be a
+      # host-visible address rather than `http://api:8000`.
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tailwind.config.js:/app/tailwind.config.js
+      - ./frontend/postcss.config.js:/app/postcss.config.js
+      # Keep the image's node_modules; the host has a different platform's
+      # binaries and mounting over them breaks the container.
+      - /app/node_modules
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
