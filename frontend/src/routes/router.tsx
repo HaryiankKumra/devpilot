@@ -2,11 +2,12 @@
  * Route table.
  *
  * Auth pages sit outside `AppLayout` because they must render before a user
- * exists; everything else shares the application chrome. Route guarding lands
- * in Milestone 2 alongside authentication.
+ * exists. Everything else sits behind `ProtectedRoute`, which redirects to the
+ * login page and remembers where the user was heading.
  */
 
 import { AppLayout } from '@/components/AppLayout';
+import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
@@ -23,7 +24,11 @@ export const router = createBrowserRouter([
   { path: '/register', element: <RegisterPage /> },
   {
     path: '/',
-    element: <AppLayout />,
+    element: (
+      <ProtectedRoute>
+        <AppLayout />
+      </ProtectedRoute>
+    ),
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <DashboardPage /> },

@@ -1,20 +1,53 @@
 """Shared pytest fixtures.
 
-The test suite builds its own `Settings` and passes it to `create_app()`, so it
-never depends on a developer's local `.env`. Tests in this file require no
-running PostgreSQL or Redis; anything that does is marked `integration`.
+The suite builds its own `Settings` and passes them to `create_app()`, so it
+never depends on a developer's local `.env`.
+
+Database tests run against an in-memory SQLite database rather than PostgreSQL,
+which keeps them fast and runnable with no services installed. The tradeoff is
+real and worth stating: SQLite is not PostgreSQL, so these tests verify
+application behaviour (constraints, cascades, query logic) rather than
+PostgreSQL-specific behaviour. The parts that genuinely need PostgreSQL --
+pgvector similarity search above all -- are marked `integration` and skipped
+here. `tests/test_migrations.py` separately proves the migrations still match
+the models, which is the drift these tests could otherwise hide.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine, Table, create_engine, event
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from app.api.deps import get_db
 from app.core.config import Environment, Settings
+
+# Imported for its import side effect: registering every model on
+# `Base.metadata`. Aliased because the bare `import app.db.models` form binds
+# the name `app`, which would collide with the `app` fixture below.
+from app.db import models as _models  # noqa: F401
+from app.db.base import Base
+from app.db.models.user import User
+from app.db.redis import get_redis
 from app.main import create_app
+
+# `code_chunks` stores a pgvector column, which has no SQLite equivalent.
+SQLITE_UNSUPPORTED_TABLES = frozenset({"code_chunks"})
+
+
+def portable_tables() -> list[Table]:
+    """Every table that can be created on SQLite."""
+    return [
+        table
+        for name, table in Base.metadata.tables.items()
+        if name not in SQLITE_UNSUPPORTED_TABLES
+    ]
 
 
 @pytest.fixture(scope="session")
@@ -28,9 +61,53 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def app(settings: Settings) -> FastAPI:
-    """A freshly wired application, isolated per test."""
-    return create_app(settings)
+def db_engine() -> Iterator[Engine]:
+    """An isolated in-memory database, rebuilt for each test."""
+    engine = create_engine(
+        "sqlite://",
+        # An in-memory SQLite database belongs to its connection, so a normal
+        # pool would hand out a different (empty) database to the next caller.
+        # StaticPool keeps one connection for the whole engine.
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enforce_foreign_keys(connection: Any, _record: Any) -> None:
+        # SQLite ignores foreign keys unless asked not to, which would silently
+        # make every cascade and referential-integrity test pass.
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine, tables=portable_tables())
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def db_session(db_engine: Engine) -> Iterator[Session]:
+    """A session bound to the throwaway database."""
+    with Session(db_engine, expire_on_commit=False) as session:
+        yield session
+
+
+@pytest.fixture
+def app(settings: Settings, db_session: Session) -> FastAPI:
+    """An application wired to the test database.
+
+    `get_db` is overridden to hand back the *same* session the test holds, so a
+    test can inspect rows a request wrote without opening a second connection.
+    """
+    application = create_app(settings)
+
+    def override_get_db() -> Iterator[Session]:
+        yield db_session
+
+    application.dependency_overrides[get_db] = override_get_db
+    return application
 
 
 @pytest.fixture
@@ -38,3 +115,52 @@ def client(app: FastAPI) -> Iterator[TestClient]:
     """HTTP client bound to the test application."""
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def unstubbed_client(settings: Settings) -> Iterator[TestClient]:
+    """A client with no dependency overrides at all.
+
+    Used by tests that must prove an endpoint works without touching the
+    database or Redis, which an override would quietly hide.
+    """
+    with TestClient(create_app(settings)) as test_client:
+        yield test_client
+
+
+# --- Domain fixtures ---------------------------------------------------------
+
+TEST_PASSWORD = "correct-horse-battery-staple"
+
+
+@pytest.fixture
+def registered_user(db_session: Session) -> User:
+    """An active account with a known password."""
+    from app.services.auth import register_user
+
+    user = register_user(
+        db_session,
+        email="developer@example.com",
+        password=TEST_PASSWORD,
+        full_name="Test Developer",
+    )
+    db_session.commit()
+    return user
+
+
+@pytest.fixture
+def auth_headers(client: TestClient, registered_user: User) -> dict[str, str]:
+    """Authorization header carrying a valid token for `registered_user`."""
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": registered_user.email, "password": TEST_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+@pytest.fixture(autouse=True)
+def _reset_redis_cache() -> Iterator[None]:
+    """Stop a cached Redis client leaking between tests."""
+    yield
+    get_redis.cache_clear()

@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import SecretStr
 
-from app.core.config import Environment, Settings, get_settings
+from app.core.config import (
+    DEVELOPMENT_SECRET_KEY,
+    Environment,
+    Settings,
+    get_settings,
+)
 from app.main import create_app
 
 
@@ -12,6 +18,8 @@ class TestSettings:
     def test_reads_prefixed_environment_variables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("DEVPILOT_ENVIRONMENT", "production")
         monkeypatch.setenv("DEVPILOT_LOG_LEVEL", "WARNING")
+        # Production refuses to start on the placeholder secret, so supply one.
+        monkeypatch.setenv("DEVPILOT_SECRET_KEY", "x" * 48)
 
         loaded = Settings(_env_file=None)
 
@@ -50,8 +58,47 @@ class TestDocsExposure:
 
     def test_interactive_docs_are_disabled_in_production(self) -> None:
         """The schema advertises every route, so production must not serve it."""
-        app = create_app(Settings(environment=Environment.PRODUCTION))
+        app = create_app(
+            Settings(environment=Environment.PRODUCTION, secret_key=SecretStr("x" * 48))
+        )
 
         assert app.docs_url is None
         assert app.redoc_url is None
         assert app.openapi_url is None
+
+
+class TestProductionSecretGuard:
+    """A predictable signing key lets anyone mint a token for any account."""
+
+    def test_production_refuses_the_development_placeholder(self) -> None:
+        with pytest.raises(ValueError, match="development placeholder"):
+            Settings(environment=Environment.PRODUCTION, _env_file=None)
+
+    def test_production_refuses_a_short_secret(self) -> None:
+        with pytest.raises(ValueError, match="at least"):
+            Settings(
+                environment=Environment.PRODUCTION,
+                secret_key=SecretStr("too-short"),
+                _env_file=None,
+            )
+
+    def test_production_accepts_a_strong_secret(self) -> None:
+        loaded = Settings(
+            environment=Environment.PRODUCTION,
+            secret_key=SecretStr("x" * 48),
+            _env_file=None,
+        )
+
+        assert loaded.is_production
+
+    def test_non_production_tolerates_the_placeholder(self) -> None:
+        """Local development must not require secret generation to start."""
+        loaded = Settings(environment=Environment.LOCAL, _env_file=None)
+
+        assert loaded.secret_key.get_secret_value() == DEVELOPMENT_SECRET_KEY
+
+    def test_the_secret_is_not_exposed_by_repr(self) -> None:
+        """`SecretStr` keeps the key out of logs and tracebacks."""
+        loaded = Settings(secret_key=SecretStr("super-secret-value"), _env_file=None)
+
+        assert "super-secret-value" not in repr(loaded)

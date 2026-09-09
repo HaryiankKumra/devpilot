@@ -8,8 +8,9 @@ relevant repository context with semantic search, ask an LLM for a strictly
 validated structured review, score the risk deterministically, and post the
 high-confidence findings back to the pull request.
 
-> **Status: Milestone 1 of 12 complete.** The API, database, cache and frontend
-> shell run end to end. Review functionality is not implemented yet — see
+> **Status: Milestone 2 of 12 complete.** Accounts, authentication and the full
+> database schema are in place; you can register, sign in and reach a protected
+> dashboard. The review pipeline itself is not implemented yet — see
 > [Roadmap](#roadmap). Pages that are routed but not built say so explicitly
 > rather than showing placeholder data.
 
@@ -23,6 +24,8 @@ high-confidence findings back to the pull request.
 - [Quick start (Docker)](#quick-start-docker)
 - [Running without Docker](#running-without-docker)
 - [Environment variables](#environment-variables)
+- [API](#api)
+- [Database](#database)
 - [Testing and quality gates](#testing-and-quality-gates)
 - [Project layout](#project-layout)
 - [Roadmap](#roadmap)
@@ -159,10 +162,60 @@ the codebase reads `os.environ` directly, and no secret has a real default.
 | `DEVPILOT_ENVIRONMENT`  | `local`, `ci` or `production`            |
 | `DEVPILOT_DEBUG`        | Verbose errors and human-readable logs   |
 | `DEVPILOT_LOG_LEVEL`    | Standard Python log level                |
+| `DEVPILOT_SECRET_KEY`   | Signs access tokens; production refuses to start on the placeholder |
+| `DEVPILOT_ACCESS_TOKEN_EXPIRE_MINUTES` | Access-token lifetime     |
 | `DEVPILOT_DATABASE_URL` | PostgreSQL connection URL                |
 | `DEVPILOT_REDIS_URL`    | Redis connection URL                     |
 | `DEVPILOT_CORS_ORIGINS` | Comma-separated allowed browser origins  |
 | `VITE_API_BASE_URL`     | API URL the browser should call          |
+
+## API
+
+Interactive documentation is served at `/docs` outside production. Current
+endpoints:
+
+| Method | Path                    | Purpose                              |
+| ------ | ----------------------- | ------------------------------------ |
+| GET    | `/health`               | Liveness; touches no dependency      |
+| GET    | `/health/ready`         | Readiness; probes Postgres and Redis |
+| POST   | `/api/v1/auth/register` | Create an account                    |
+| POST   | `/api/v1/auth/login`    | Exchange credentials for a token     |
+| GET    | `/api/v1/auth/me`       | The authenticated user               |
+
+Errors always use one envelope, so clients parse a single shape:
+
+```json
+{ "error": { "code": "invalid_credentials", "message": "Incorrect email or password." } }
+```
+
+Authenticated requests carry `Authorization: Bearer <token>`.
+
+## Database
+
+Eight tables: `users`, `repositories`, `pull_requests`, `webhook_events`,
+`review_jobs`, `reviews`, `findings`, `code_chunks`. The schema and the
+reasoning behind it are described in
+[`docs/architecture.md`](docs/architecture.md#data-model).
+
+Schema changes are applied only through Alembic; the application never creates
+tables at startup.
+
+```bash
+cd backend
+alembic upgrade head            # apply migrations
+alembic upgrade head --sql      # review the SQL without connecting
+alembic revision --autogenerate -m "describe the change"
+alembic downgrade -1            # roll back one migration
+```
+
+Under Docker Compose, run them inside the API container:
+
+```bash
+docker compose exec api alembic upgrade head
+```
+
+`code_chunks` needs the pgvector extension, which is why it lives in its own
+migration (`0002`) rather than the initial one.
 
 ## Testing and quality gates
 
@@ -185,9 +238,15 @@ npm run format:check
 npm run build          # includes a full TypeScript project build
 ```
 
-Tests that need real PostgreSQL and Redis are marked `integration` and can be
-excluded with `-m "not integration"`. Everything currently in the suite runs
-with no services running at all.
+The suite runs with no services installed. Application tests use an in-memory
+SQLite database, and `tests/test_migrations.py` renders the Alembic migrations
+to PostgreSQL DDL offline and asserts they still match the ORM models — which is
+what catches the "edited a model, forgot the migration" drift that SQLite-based
+tests would otherwise hide.
+
+Tests that genuinely need PostgreSQL and Redis (pgvector similarity search,
+above all) are marked `integration` and can be excluded with
+`-m "not integration"`.
 
 ## Project layout
 
@@ -219,8 +278,8 @@ what keeps business logic testable without HTTP.
 | #   | Milestone                                            | Status |
 | --- | ---------------------------------------------------- | ------ |
 | 1   | Repo setup, Compose, FastAPI, React, Postgres, Redis | Done   |
-| 2   | Authentication and database models                   | Next   |
-| 3   | GitHub App integration and repository management     |        |
+| 2   | Authentication and database models                   | Done   |
+| 3   | GitHub App integration and repository management     | Next   |
 | 4   | Webhook ingestion and idempotency                    |        |
 | 5   | Celery workers and asynchronous review jobs          |        |
 | 6   | PR diff retrieval and static analysis                |        |

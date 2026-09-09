@@ -6,6 +6,7 @@
  * re-implement the same status-checking and JSON-parsing dance.
  */
 
+import { getAccessToken } from '@/lib/authToken';
 import { env } from '@/lib/env';
 
 /** An error response from the API, or a transport failure reaching it. */
@@ -46,15 +47,24 @@ async function readError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message);
 }
 
-export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+export interface ApiFetchOptions extends RequestInit {
+  /** Set false for endpoints that must not carry credentials (login, register). */
+  authenticated?: boolean;
+}
+
+export async function apiFetch<T>(path: string, init: ApiFetchOptions = {}): Promise<T> {
+  const { authenticated = true, ...requestInit } = init;
+  const token = authenticated ? getAccessToken() : null;
+
   let response: Response;
   try {
     response = await fetch(`${env.apiBaseUrl}${path}`, {
-      ...init,
+      ...requestInit,
       headers: {
         Accept: 'application/json',
-        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-        ...init.headers,
+        ...(requestInit.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...requestInit.headers,
       },
     });
   } catch (cause) {

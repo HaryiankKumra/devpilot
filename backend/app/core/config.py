@@ -12,8 +12,14 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, PostgresDsn, RedisDsn, field_validator
+from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Obvious, greppable placeholder. Production refuses to start with this value.
+DEVELOPMENT_SECRET_KEY = "insecure-development-secret-key-do-not-use-in-production"
+
+# Below this length an HS256 key is brute-forceable offline from a single token.
+MINIMUM_SECRET_KEY_LENGTH = 32
 
 
 class Environment(StrEnum):
@@ -70,6 +76,18 @@ class Settings(BaseSettings):
 
     redis_socket_timeout_seconds: int = Field(default=2, ge=1)
 
+    # --- Authentication ------------------------------------------------------
+    # Signs and verifies access tokens. The placeholder below only ever applies
+    # outside production -- `_reject_insecure_production_secret` refuses to boot
+    # a production process that is still using it, because a predictable signing
+    # key lets anyone mint a token for any account.
+    secret_key: SecretStr = Field(default=SecretStr(DEVELOPMENT_SECRET_KEY))
+    jwt_algorithm: str = Field(default="HS256")
+    # Short enough to limit the damage of a leaked token, long enough not to
+    # interrupt a working session. Access tokens cannot be revoked before they
+    # expire; see docs/engineering-tradeoffs.md.
+    access_token_expire_minutes: int = Field(default=60, ge=1)
+
     # --- HTTP ----------------------------------------------------------------
     # `NoDecode` suppresses pydantic-settings' default JSON decoding for complex
     # types, which would otherwise reject `a,b` before the validator below runs.
@@ -88,6 +106,31 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment is Environment.PRODUCTION
+
+    @model_validator(mode="after")
+    def _reject_insecure_production_secret(self) -> Settings:
+        """Fail fast rather than run production with a guessable signing key.
+
+        A misconfigured secret is invisible at runtime -- everything works --
+        while allowing anyone who knows the default to forge a token for any
+        account. Refusing to boot converts a silent compromise into an obvious
+        deployment error.
+        """
+        if not self.is_production:
+            return self
+
+        secret = self.secret_key.get_secret_value()
+        if secret == DEVELOPMENT_SECRET_KEY:
+            raise ValueError(
+                "DEVPILOT_SECRET_KEY is still the development placeholder. "
+                'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        if len(secret) < MINIMUM_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"DEVPILOT_SECRET_KEY must be at least {MINIMUM_SECRET_KEY_LENGTH} "
+                f"characters in production; got {len(secret)}."
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

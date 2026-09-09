@@ -1,5 +1,6 @@
 import { ApiStatusBadge } from '@/components/ApiStatusBadge';
-import { NavLink, Outlet } from 'react-router-dom';
+import { useAuth, useLogout } from '@/features/auth/useAuth';
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -16,6 +17,15 @@ function navLinkClass({ isActive }: { isActive: boolean }): string {
 
 /** Chrome shared by every authenticated page: header, navigation, content slot. */
 export function AppLayout() {
+  const { user } = useAuth();
+  const logout = useLogout();
+  const navigate = useNavigate();
+
+  function handleSignOut() {
+    logout();
+    navigate('/login', { replace: true });
+  }
+
   return (
     <div className="min-h-screen">
       <header className="border-b border-slate-200 bg-white">
@@ -29,6 +39,20 @@ export function AppLayout() {
             ))}
           </nav>
           <ApiStatusBadge />
+          {user && (
+            <div className="flex items-center gap-3">
+              <span className="hidden text-sm text-slate-600 sm:inline">
+                {user.email}
+              </span>
+              <button
+                type="button"
+                onClick={handleSignOut}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
+              >
+                Sign out
+              </button>
+            </div>
+          )}
         </div>
       </header>
 

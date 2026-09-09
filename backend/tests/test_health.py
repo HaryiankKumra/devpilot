@@ -40,9 +40,10 @@ def _override(app: FastAPI, *, db_healthy: bool, redis_healthy: bool) -> None:
 
 
 class TestLiveness:
-    def test_returns_ok_without_touching_dependencies(self, client: TestClient) -> None:
-        # No dependency overrides are registered: the endpoint must not need them.
-        response = client.get("/health")
+    def test_returns_ok_without_touching_dependencies(self, unstubbed_client: TestClient) -> None:
+        # This client has no dependency overrides, so a database or Redis
+        # dependency creeping into liveness would fail here.
+        response = unstubbed_client.get("/health")
 
         assert response.status_code == 200
         body = response.json()
@@ -50,13 +51,13 @@ class TestLiveness:
         assert body["environment"] == "ci"
         assert body["version"]
 
-    def test_echoes_a_request_id_header(self, client: TestClient) -> None:
-        response = client.get("/health")
+    def test_echoes_a_request_id_header(self, unstubbed_client: TestClient) -> None:
+        response = unstubbed_client.get("/health")
 
         assert response.headers["X-Request-ID"]
 
-    def test_reuses_an_upstream_request_id(self, client: TestClient) -> None:
-        response = client.get("/health", headers={"X-Request-ID": "abc-123"})
+    def test_reuses_an_upstream_request_id(self, unstubbed_client: TestClient) -> None:
+        response = unstubbed_client.get("/health", headers={"X-Request-ID": "abc-123"})
 
         assert response.headers["X-Request-ID"] == "abc-123"
 

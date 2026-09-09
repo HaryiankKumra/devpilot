@@ -22,14 +22,31 @@ class DevPilotError(Exception):
     status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR
     code: str = "internal_error"
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, headers: dict[str, str] | None = None) -> None:
         super().__init__(message)
         self.message = message
+        # Some failures are only correct with a header attached: a 401 must
+        # carry `WWW-Authenticate` per RFC 6750, and a 429 should carry
+        # `Retry-After`. Carrying them on the exception keeps that detail with
+        # the failure rather than duplicating it at every raise site.
+        self.headers = headers
 
 
 class NotFoundError(DevPilotError):
     status_code = status.HTTP_404_NOT_FOUND
     code = "not_found"
+
+
+class NotAuthenticatedError(DevPilotError):
+    """No usable credentials were supplied."""
+
+    status_code = status.HTTP_401_UNAUTHORIZED
+    code = "not_authenticated"
+
+    def __init__(self, message: str = "Not authenticated.") -> None:
+        # RFC 6750: a 401 from a bearer-token resource must say which scheme the
+        # client should use, or a compliant client cannot know how to retry.
+        super().__init__(message, headers={"WWW-Authenticate": "Bearer"})
 
 
 class ConflictError(DevPilotError):
@@ -61,6 +78,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=_error_body(exc.code, exc.message),
+            headers=exc.headers,
         )
 
     @app.exception_handler(Exception)
