@@ -189,11 +189,16 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
+      # CMD-SHELL, not CMD: the exec form runs no shell, so `$HOSTNAME` reaches
+      # celery as a literal node name nothing answers to and the probe fails on
+      # a healthy worker -- which in production means an orchestrator restarting
+      # a container that was working. `-d` scopes the ping to this container's
+      # own node, so scaling to several workers does not make each one report
+      # healthy because a *different* one replied.
       test:
         [
-          "CMD",
-          "celery", "-A", "app.worker.celery_app:celery_app",
-          "inspect", "ping", "-d", "celery@$$HOSTNAME",
+          "CMD-SHELL",
+          "celery -A app.worker.celery_app:celery_app inspect ping -d celery@$$HOSTNAME",
         ]
       interval: 30s
       timeout: 10s

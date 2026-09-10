@@ -110,7 +110,18 @@ services:
     healthcheck:
       # `inspect ping` asks the running worker to answer over the broker, which
       # proves both the process and its Redis connection are alive.
-      test: ["CMD", "celery", "-A", "app.worker.celery_app:celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      #
+      # CMD-SHELL, not CMD: the exec form runs no shell, so `$HOSTNAME` reaches
+      # celery as the literal string `celery@$HOSTNAME`, which no worker answers
+      # to -- the check then fails with "No nodes replied" on a healthy worker.
+      # `-d` targets *this* container's node specifically -- without it the
+      # check passes whenever any worker on the broker replies, which is exactly
+      # wrong for a per-container probe once there is more than one.
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.worker.celery_app:celery_app inspect ping -d celery@$$HOSTNAME",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

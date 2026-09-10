@@ -426,7 +426,7 @@ what keeps business logic testable without HTTP.
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — components and boundaries
-- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 92 decisions, their alternatives, and what each one costs
+- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 93 decisions, their alternatives, and what each one costs
 - [`docs/api.md`](docs/api.md) — endpoint reference and why each one is shaped that way
 - [`docs/database-schema.md`](docs/database-schema.md) — the eight tables, their constraints, and the reasoning
 - [`docs/deployment.md`](docs/deployment.md) — running it in production, and the checklist before you do

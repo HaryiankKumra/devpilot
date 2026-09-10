@@ -1567,3 +1567,36 @@ the container.
 **Cost:** a full Redis rejects new jobs instead of quietly shedding old ones. That
 is the correct trade for a queue and the wrong one for a cache, which is why the
 rate-limit counters -- the only cache-like data here -- expire on their own.
+
+## 93. The worker healthcheck runs through a shell
+
+**Chosen:** `test: ["CMD-SHELL", "celery ... inspect ping -d celery@$$HOSTNAME"]`.
+
+**Alternative (and the original):** the exec form, `["CMD", "celery", ..., "-d",
+"celery@$$HOSTNAME"]`.
+
+**Why:** the exec form runs no shell, so nothing expands `$HOSTNAME`. Celery
+received a literal node name of `celery@$HOSTNAME`, no worker answered to it, and
+the probe failed with `No nodes replied within time constraint` -- on a worker
+that was consuming tasks perfectly well the entire time. Compose's `$$` escape
+made this harder to see, because it looks exactly like the shell escaping you
+would write if a shell were involved.
+
+The failure mode is worse than a missing healthcheck. Docker reported the
+container `unhealthy`, so in production an orchestrator would restart a working
+worker every few minutes -- mid-review, forever -- and the logs would show
+nothing wrong, because nothing was.
+
+`-d` is kept rather than pinging every node on the broker: without it the probe
+passes whenever *any* worker replies, so scaling to three workers would mean two
+dead ones still reporting healthy because the third answered.
+
+**Cost:** one shell process per probe, every thirty seconds.
+
+**How it was found:** looking at `docker ps` output during Milestone 12 and
+noticing the worker had been `(unhealthy)` for twenty-six minutes. No test
+asserts on a Compose healthcheck, and the review pipeline had just been verified
+end to end through that same container -- which is precisely why it went
+unnoticed. It is the fifth bug in this project that was invisible to a green test
+suite and obvious the moment someone read what the running containers said about
+themselves.
