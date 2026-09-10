@@ -93,3 +93,45 @@ class GitHubOAuthToken(GitHubModel):
     access_token: str
     token_type: str = "bearer"
     scope: str = ""
+
+
+# --- Webhook event payloads --------------------------------------------------
+# GitHub sends a different envelope per event type. Only the events DevPilot
+# acts on are modelled; everything else is recorded and ignored without being
+# parsed, so an unmodelled event can never crash the endpoint.
+
+
+class GitHubInstallationRef(GitHubModel):
+    """The `installation` stub embedded in most webhook payloads."""
+
+    id: int
+
+
+class InstallationEvent(GitHubModel):
+    """`installation` and `installation_repositories` deliveries.
+
+    `sender` is the person who clicked install. It is how DevPilot decides which
+    local account owns the repositories: their GitHub id was recorded when they
+    linked their account.
+    """
+
+    action: str
+    installation: GitHubInstallation
+    sender: GitHubAccount | None = None
+
+    # Present on `installation` created/deleted.
+    repositories: list[GitHubRepository] = Field(default_factory=list)
+    # Present on `installation_repositories` added/removed.
+    repositories_added: list[GitHubRepository] = Field(default_factory=list)
+    repositories_removed: list[GitHubRepository] = Field(default_factory=list)
+
+
+class PullRequestEvent(GitHubModel):
+    """A `pull_request` delivery."""
+
+    action: str
+    number: int
+    pull_request: GitHubPullRequest
+    repository: GitHubRepository
+    installation: GitHubInstallationRef | None = None
+    sender: GitHubAccount | None = None

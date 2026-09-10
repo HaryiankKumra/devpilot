@@ -8,11 +8,17 @@ relevant repository context with semantic search, ask an LLM for a strictly
 validated structured review, score the risk deterministically, and post the
 high-confidence findings back to the pull request.
 
-> **Status: Milestone 2 of 12 complete.** Accounts, authentication and the full
-> database schema are in place; you can register, sign in and reach a protected
-> dashboard. The review pipeline itself is not implemented yet — see
-> [Roadmap](#roadmap). Pages that are routed but not built say so explicitly
-> rather than showing placeholder data.
+> **Status: Milestone 4 of 12 complete.** Accounts, the GitHub App integration
+> and verified webhook ingestion all work: a pull request on a connected
+> repository is recorded and a review job is queued. Nothing processes that
+> queue yet — the worker arrives in Milestone 5 — and no review is produced.
+> Pages that are routed but not built say so explicitly rather than showing
+> placeholder data.
+>
+> **It runs with no GitHub credentials.** `DEVPILOT_GITHUB_MODE=mock` (the
+> default) serves the GitHub API from an in-process fake, so the whole
+> application works out of the box. See
+> [`docs/github-app-setup.md`](docs/github-app-setup.md) to connect real GitHub.
 
 ---
 
@@ -167,6 +173,10 @@ the codebase reads `os.environ` directly, and no secret has a real default.
 | `DEVPILOT_DATABASE_URL` | PostgreSQL connection URL                |
 | `DEVPILOT_REDIS_URL`    | Redis connection URL                     |
 | `DEVPILOT_CORS_ORIGINS` | Comma-separated allowed browser origins  |
+| `DEVPILOT_GITHUB_MODE`  | `mock` (no credentials) or `live`        |
+| `DEVPILOT_GITHUB_APP_ID`, `..._PRIVATE_KEY_PATH` | GitHub App identity |
+| `DEVPILOT_GITHUB_WEBHOOK_SECRET` | Verifies incoming webhooks      |
+| `DEVPILOT_GITHUB_CLIENT_ID`, `..._CLIENT_SECRET` | OAuth account linking |
 | `VITE_API_BASE_URL`     | API URL the browser should call          |
 
 ## API
@@ -181,6 +191,16 @@ endpoints:
 | POST   | `/api/v1/auth/register` | Create an account                    |
 | POST   | `/api/v1/auth/login`    | Exchange credentials for a token     |
 | GET    | `/api/v1/auth/me`       | The authenticated user               |
+| GET    | `/api/v1/github/status` | Whether a GitHub account is linked   |
+| GET    | `/api/v1/github/authorize` | Begin GitHub OAuth linking        |
+| GET    | `/api/v1/github/callback`  | GitHub OAuth callback             |
+| DELETE | `/api/v1/github/link`   | Unlink the GitHub account            |
+| GET    | `/api/v1/repositories`  | List tracked repositories            |
+| GET    | `/api/v1/repositories/installations` | GitHub App installations|
+| POST   | `/api/v1/repositories/sync` | Reconcile with an installation   |
+| GET    | `/api/v1/repositories/{id}` | One repository                   |
+| GET    | `/api/v1/repositories/{id}/pull-requests` | Its pull requests  |
+| POST   | `/api/v1/webhooks/github` | Receive a GitHub delivery          |
 
 Errors always use one envelope, so clients parse a single shape:
 
@@ -279,9 +299,9 @@ what keeps business logic testable without HTTP.
 | --- | ---------------------------------------------------- | ------ |
 | 1   | Repo setup, Compose, FastAPI, React, Postgres, Redis | Done   |
 | 2   | Authentication and database models                   | Done   |
-| 3   | GitHub App integration and repository management     | Next   |
-| 4   | Webhook ingestion and idempotency                    |        |
-| 5   | Celery workers and asynchronous review jobs          |        |
+| 3   | GitHub App integration and repository management     | Done   |
+| 4   | Webhook ingestion and idempotency                    | Done   |
+| 5   | Celery workers and asynchronous review jobs          | Next   |
 | 6   | PR diff retrieval and static analysis                |        |
 | 7   | LLM integration with structured output validation    |        |
 | 8   | Repository indexing and pgvector RAG                 |        |
@@ -294,6 +314,7 @@ what keeps business logic testable without HTTP.
 
 - [`docs/architecture.md`](docs/architecture.md) — components and boundaries
 - [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — decisions and alternatives
+- [`docs/github-app-setup.md`](docs/github-app-setup.md) — connecting a real GitHub App
 
 ## License
 

@@ -44,6 +44,19 @@ class RepositoryStore:
         )
         return self._session.execute(statement).scalars().all()
 
+    def list_for_installation(self, installation_id: int) -> Sequence[Repository]:
+        """Every repository under one GitHub App installation.
+
+        Needed when an installation is deleted or suspended: the delivery names
+        the installation, not the individual repositories.
+        """
+        statement = (
+            select(Repository)
+            .where(Repository.installation_id == installation_id)
+            .order_by(Repository.full_name)
+        )
+        return self._session.execute(statement).scalars().all()
+
     def add(self, repository: Repository) -> Repository:
         self._session.add(repository)
         self._session.flush()

@@ -379,3 +379,173 @@ arrives, slots in between the two steps without changing the login contract.
 
 **Cost:** one extra round trip on signup. The registration page hides it by
 chaining the two calls.
+
+---
+
+# Milestones 3 and 4 decisions
+
+## 21. A mock GitHub, shipped as a first-class mode
+
+**Chosen:** `DEVPILOT_GITHUB_MODE=mock` serves the GitHub API from an in-process
+fake, and it is the default.
+
+**Alternative:** require a registered GitHub App to run anything.
+
+**Why:** registering an App, generating a private key and exposing a public
+webhook URL is a genuine barrier — for a reviewer of this project, for a new
+contributor, and for CI. The mock removes it entirely. What keeps it honest is
+that it returns the same Pydantic-validated types as the real client and
+implements the same Protocol, so code exercised against it works against the
+real API. It supplies repositories and pull requests; it never fabricates a
+review.
+
+**Cost:** a second implementation to keep in step with the first. The Protocol
+makes divergence a type error rather than a runtime surprise.
+
+## 22. A Protocol for the GitHub client, not a base class
+
+**Chosen:** `GitHubClient` is a `typing.Protocol`; the real and mock clients
+implement it independently.
+
+**Alternative:** an abstract base class both inherit from.
+
+**Why:** a base class invites shared behaviour, and shared behaviour between a
+real client and a fake is exactly what makes a fake stop predicting reality. A
+Protocol carries no implementation, so the mock cannot accidentally inherit
+retry logic or header construction that the real client is supposed to own.
+
+**Cost:** the two implementations repeat their method signatures. mypy catches
+any drift.
+
+## 23. Repository sync keyed on GitHub's id, and deactivation instead of deletion
+
+**Chosen:** upsert on `github_repo_id`; repositories that vanish are marked
+inactive.
+
+**Alternative:** key on `full_name`, and delete rows that disappear.
+
+**Why:** repositories get renamed and transferred between organisations. Keying
+on the name would create a second row on every rename and orphan the review
+history attached to the old one; GitHub's numeric id is the only identifier that
+survives. Deletion is worse still: it cascades to pull requests, reviews and
+findings, discarding history that is still worth reading — and an app that is
+uninstalled is very often reinstalled, at which point the same rows should come
+back rather than being recreated empty.
+
+**Cost:** inactive rows accumulate and need filtering in queries. That is a much
+cheaper problem than lost history.
+
+## 24. Verifying webhook signatures over raw bytes, before parsing
+
+**Chosen:** read `await request.body()`, verify the HMAC, and only then parse
+JSON. The route does not use FastAPI's request-model binding.
+
+**Alternative:** bind a Pydantic model as usual and verify afterwards.
+
+**Why:** the signature covers the exact bytes GitHub sent. Parsing and
+re-serialising produces different bytes — key order, whitespace and unicode
+escaping all shift — so verification against re-serialised JSON either fails
+constantly or has been loosened until it proves nothing. Model binding happens
+before any handler code runs, so it forecloses the option entirely.
+
+Comparison uses `hmac.compare_digest`. A plain `==` on the digest returns as
+soon as two bytes differ, so its timing leaks how much of the prefix was
+correct — enough to recover a valid signature byte by byte.
+
+**Cost:** the endpoint parses its own body and is more verbose than a typical
+route. That verbosity is the security property.
+
+## 25. Refusing every webhook when no secret is configured
+
+**Chosen:** with no `DEVPILOT_GITHUB_WEBHOOK_SECRET`, every delivery is rejected
+with 401.
+
+**Alternative:** skip verification when no secret is set, so local development
+is easier.
+
+**Why:** "verification is optional when unconfigured" means one missing
+environment variable silently turns a security control off, in exactly the
+deployment where nobody notices. Anyone who guessed the URL could then create
+review jobs and cause comments to be posted. Local development is served by mock
+mode instead, which needs no webhooks at all.
+
+**Cost:** you cannot poke the webhook endpoint with curl without computing a
+signature first. `tests/test_webhook_api.py` shows how in three lines.
+
+## 26. Idempotency by insert-and-catch, not check-then-insert
+
+**Chosen:** insert the delivery id inside a SAVEPOINT and treat the unique
+violation as "already seen".
+
+**Alternative:** `SELECT` for the delivery id first, and insert if absent.
+
+**Why:** check-then-insert has a window between the two statements in which a
+concurrent retry also sees "not present", and both proceed to create a review.
+GitHub retries aggressively, and its retries can overlap. The unique constraint
+has no such window — the database serialises the two inserts and exactly one
+wins. The SAVEPOINT matters because without it the constraint violation would
+poison the whole transaction, and the request could not go on to answer.
+
+**Cost:** using an exception for expected control flow reads oddly. The
+alternative is a race condition that produces duplicate comments on a customer's
+pull request.
+
+## 27. Recording ignored and failed deliveries rather than dropping them
+
+**Chosen:** every signed delivery is written to `webhook_events`, including ones
+DevPilot does not act on, with a status of `ignored` or `failed`.
+
+**Alternative:** only store deliveries that produce work.
+
+**Why:** the table is the idempotency ledger, so a delivery that is not recorded
+is a delivery whose retry is not recognised. It also doubles as an audit trail:
+"why was this pull request never reviewed?" is answerable in one query when the
+ignored deliveries and their reasons are all present.
+
+**Cost:** the table grows monotonically and will eventually need a retention
+policy. Noted for Milestone 12.
+
+## 28. Answering 2xx for duplicates and unhandled events
+
+**Chosen:** a redelivery answers 200; an event DevPilot does not act on answers
+200; only genuine work answers 202.
+
+**Alternative:** 409 for duplicates, 400 for unhandled events.
+
+**Why:** GitHub reads any non-2xx as a failed delivery and retries it. Answering
+409 to a retry guarantees another retry, and another — the endpoint would fight
+its own idempotency. The distinction the caller needs is in the body, which is
+what the App's delivery log displays.
+
+**Cost:** "success" covers several distinct outcomes at the HTTP layer. The
+response body names which one.
+
+## 29. Cancelling superseded review jobs on a new push
+
+**Chosen:** when a push moves the head commit, unfinished jobs for the previous
+commit are marked `cancelled` and a new one is queued.
+
+**Alternative:** let every queued job run to completion.
+
+**Why:** the old diff is no longer what anyone will merge, so reviewing it
+spends an LLM call — the most expensive thing DevPilot does — producing findings
+about code that has already changed. On an actively developed pull request that
+is most of the cost for none of the value. The rows are kept and only their
+status changes, so the audit trail survives.
+
+**Cost:** a review that was nearly finished is discarded. Milestone 5 can refine
+this to let a job that has already started run to completion.
+
+## 30. Not reviewing draft pull requests
+
+**Chosen:** deliveries for drafts are recorded but queue no review.
+
+**Alternative:** review everything, and let the author ignore the comments.
+
+**Why:** a draft is the author explicitly saying the work is not ready. Posting
+review comments on it is noise, and each one costs an LLM call on code that is
+still being written. `ready_for_review` is in the reviewable action set, so a
+review is queued the moment the author says it is ready.
+
+**Cost:** someone who works permanently in draft mode gets no reviews. Making
+this configurable per repository is a natural later addition.

@@ -41,6 +41,16 @@ class UserRepository:
         statement = select(User).where(User.email == self.normalise_email(email))
         return self._session.execute(statement).scalar_one_or_none()
 
+    def get_by_github_id(self, github_id: int) -> User | None:
+        """Find the account linked to a GitHub identity.
+
+        Used when an installation webhook arrives: the sender's GitHub id is the
+        only link back to a DevPilot account, since the delivery carries no
+        session of ours.
+        """
+        statement = select(User).where(User.github_id == github_id)
+        return self._session.execute(statement).scalar_one_or_none()
+
     def email_exists(self, email: str) -> bool:
         statement = select(User.id).where(User.email == self.normalise_email(email))
         return self._session.execute(statement).first() is not None
