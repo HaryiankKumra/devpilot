@@ -385,15 +385,39 @@ class Settings(BaseSettings):
     def resolve_github_private_key(self) -> str | None:
         """Return the App private key PEM, from whichever source is configured.
 
-        The inline value wins so an environment variable can override a file
-        baked into an image.
+        A non-empty inline value wins, so an environment variable can override a
+        file baked into an image.
+
+        **Blank counts as unset.** `.env.example` ships
+        `DEVPILOT_GITHUB_APP_PRIVATE_KEY=` with no value, because most people
+        supply the key as a file instead. Left as a plain `is not None` check,
+        that empty string is a perfectly good `SecretStr` that wins over the
+        path -- so following the documented file route yields an empty key, and
+        the failure surfaces much later as "GitHub rejected our credentials"
+        rather than "you have not configured a key".
         """
         if self.github_app_private_key is not None:
             # Escaped newlines are near-unavoidable when a PEM travels through
             # a `.env` file or a CI secret, so accept both spellings.
-            return self.github_app_private_key.get_secret_value().replace("\\n", "\n")
+            inline = self.github_app_private_key.get_secret_value().replace("\\n", "\n")
+            if inline.strip():
+                return inline
+
         if self.github_app_private_key_path is not None:
-            return self.github_app_private_key_path.read_text(encoding="utf-8")
+            path = self.github_app_private_key_path
+            if not path.is_file():
+                # Named explicitly: inside a container this is nearly always a
+                # host path that was never mounted, and the message should say
+                # which path was tried rather than raising FileNotFoundError
+                # from somewhere deep in the request.
+                raise ValueError(
+                    f"DEVPILOT_GITHUB_APP_PRIVATE_KEY_PATH points at {path}, "
+                    "which does not exist. Inside Docker this must be a path "
+                    "*in the container* -- mount the .pem and point at the "
+                    "mounted location."
+                )
+            return path.read_text(encoding="utf-8")
+
         return None
 
     # --- HTTP ----------------------------------------------------------------

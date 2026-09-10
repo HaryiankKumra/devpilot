@@ -148,6 +148,15 @@ jobs:
       - name: Start the stack
         run: |
           cp .env.example .env
+          # Every browser test registers its own account so the tests cannot
+          # interfere with each other, and they all arrive from one IP. That
+          # trips DevPilot's own auth limiter -- 10 attempts/minute, which is
+          # the right production default and the wrong one for a test runner:
+          # the suite made 14 auth requests and the last 4 got 429.
+          #
+          # Raised rather than disabled, so the middleware stays in the request
+          # path and a limiter that miscounted would still fail this job.
+          echo "DEVPILOT_RATE_LIMIT_AUTH_REQUESTS=500" >> .env
           docker compose up -d --build
           # Wait for the API rather than sleeping: a fixed sleep is either too
           # short on a slow runner or wasted time on a fast one.

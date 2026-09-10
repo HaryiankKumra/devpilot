@@ -1877,3 +1877,71 @@ requirements file purely to avoid installing one package.
 **Cost:** the duplicate still exists; `PYTHONPATH` only decides which wins.
 **Revisit when:** the build is restructured, at which point deleting the
 installed copy is the better fix.
+
+## 104. The test suite is hermetic against `DEVPILOT_*` variables
+
+**Chosen:** a session-scoped autouse fixture removes every `DEVPILOT_*`
+environment variable for the duration of the run.
+
+**Why:** `Settings(_env_file=None)` stops pydantic-settings reading `.env`, but
+it still reads `os.environ` -- so a test asserting on a *default* is really
+asserting on whatever the surrounding shell exports. Two tests in
+`test_config.py` did exactly that. They passed on every developer machine and
+failed the moment CI set `DEVPILOT_SECRET_KEY` at workflow level, reporting that
+the production secret guard was broken when the guard was fine.
+
+That is among the worst failures to debug: the test is correct, the code is
+correct, and only the environment differs. Worse here than usual, because
+GitHub's job-log API answers 403 without a token, so the failure could not be
+read directly -- it had to be reproduced by re-running the suite locally with
+CI's exact variables exported.
+
+**Cost:** a test that genuinely wants an environment variable must set it
+itself, via `monkeypatch`. That is the correct way to write such a test anyway.
+`DEVPILOT_TEST_DATABASE_URL` is read into a module constant at import time, so
+integration tests still find the database CI points them at.
+
+## 105. CI sets no secret key at all
+
+**Chosen:** the workflow's `env:` block contains only `DEVPILOT_ENVIRONMENT: ci`.
+
+**Why:** nothing in CI needs a signing key. The tests build their own `Settings`,
+and only `production` demands a real secret. The key was added defensively, and
+"defensively" turned out to mean "visible to every test process", which is what
+broke the build.
+
+Even with the suite now hermetic, it stays out: an unused secret in a workflow
+file is only ever a liability, and a placeholder that looks like a credential
+invites someone to replace it with a real one.
+
+**Cost:** none. If a future job genuinely needs a key, it belongs in that job's
+`env:` rather than the workflow's.
+
+## 106. The end-to-end stack gets a larger auth rate limit
+
+**Chosen:** the e2e environment sets `DEVPILOT_RATE_LIMIT_AUTH_REQUESTS=500`.
+
+**Why:** every browser test registers its own account -- deliberately, so tests
+cannot interfere through shared state -- and they all arrive from one IP. The
+suite makes fourteen authentication requests in well under a minute, and the
+limit is ten, so the last four received `429` and four tests failed on a
+timeout waiting for a dashboard that was never going to load.
+
+Both halves of that are working as intended: ten attempts per minute per IP is
+the right default against credential stuffing, and per-test registration is the
+right way to keep tests independent. The mismatch is that a test runner is not
+the client the limit was written for.
+
+Raised rather than **disabled**, which is the part worth defending: the
+middleware stays in the request path, so a limiter that miscounted, or one that
+started refusing requests it should allow, would still fail this job. Disabling
+it would remove the only place the limiter is exercised against a real browser
+over a real network.
+
+**Cost:** the e2e stack is configured slightly unlike production, and that
+difference has to be remembered in two places -- the CI workflow and the README.
+Both say why.
+
+**How it was found:** the first CI run in which the end-to-end job executed at
+all. It had been skipped on every previous run because the backend job failed
+first, so this had been latent since the tests were written.

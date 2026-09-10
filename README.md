@@ -321,8 +321,16 @@ expected; every bug these actually caught lived in the seam between the layers.
 
 ```bash
 docker compose up -d
+echo "DEVPILOT_RATE_LIMIT_AUTH_REQUESTS=500" >> .env && docker compose up -d api
 cd frontend && npx playwright install chromium && npm run test:e2e
 ```
+
+That second line is not incidental. Every test registers its own account so the
+tests cannot interfere with each other, and they all arrive from one IP — which
+trips DevPilot's own auth limiter at 10 attempts/minute. The limit is the right
+production default and the wrong one for a test runner, so the e2e stack gets a
+bigger budget. It is **raised, not disabled**, so the middleware stays in the
+request path and a limiter that miscounted would still fail the suite.
 
 ### Load tests
 
@@ -437,7 +445,7 @@ what keeps business logic testable without HTTP.
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — components and boundaries
-- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 103 decisions, their alternatives, and what each one costs
+- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 106 decisions, their alternatives, and what each one costs
 - [`docs/api.md`](docs/api.md) — endpoint reference and why each one is shaped that way
 - [`docs/database-schema.md`](docs/database-schema.md) — the eight tables, their constraints, and the reasoning
 - [`docs/deployment.md`](docs/deployment.md) — running it in production, and the checklist before you do

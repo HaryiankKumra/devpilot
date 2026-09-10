@@ -75,6 +75,11 @@ services:
       # Operational scripts, for the same reason: editing one should not need a
       # rebuild before `docker compose exec` can run it.
       - ./backend/scripts:/app/scripts:ro
+      # The GitHub App private key. Mounted from a git-ignored directory rather
+      # than pasted into .env: a file does not show up in `docker inspect`, in
+      # `ps`, or in a crash dump of the environment. Read-only, because nothing
+      # should ever write to it.
+      - ./secrets:/run/secrets:ro
     command:
       ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
@@ -99,6 +104,11 @@ services:
       - ./backend/app:/app/app:ro
       - ./backend/alembic:/app/alembic:ro
       - ./backend/scripts:/app/scripts:ro
+      # The GitHub App private key. Mounted from a git-ignored directory rather
+      # than pasted into .env: a file does not show up in `docker inspect`, in
+      # `ps`, or in a crash dump of the environment. Read-only, because nothing
+      # should ever write to it.
+      - ./secrets:/run/secrets:ro
     # `--concurrency=2` keeps two reviews in flight per worker. Reviews are
     # I/O-bound (GitHub, then the LLM), so processes mostly wait; more than a
     # couple would multiply memory for little throughput.

@@ -32,3 +32,6 @@ Thumbs.db
 # ---- Local data ----
 postgres-data/
 redis-data/
+
+# Local secrets mounted into the containers (never committed).
+secrets/
