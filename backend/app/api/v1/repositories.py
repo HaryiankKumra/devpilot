@@ -41,10 +41,15 @@ def list_repositories(user: CurrentUser, session: DbSession) -> list[RepositoryR
     summary="List GitHub App installations",
 )
 def list_installations(user: CurrentUser, client: GitHub) -> list[InstallationRead]:
-    """Installations of the DevPilot App that this deployment can see.
+    """Installations belonging to the signed-in user's linked GitHub identity.
 
     Used by the UI to offer a choice of installation to sync from. Declared
     before `/{repository_id}` so the literal path is not captured as an id.
+
+    Scoped to the caller: GitHub's own endpoint lists every installation of the
+    *App*, which with more than one user means everybody's -- account logins and
+    installation ids included. A user who has not linked a GitHub identity gets
+    an empty list, because there is nothing to match them against.
     """
     return [
         InstallationRead(
@@ -52,7 +57,7 @@ def list_installations(user: CurrentUser, client: GitHub) -> list[InstallationRe
             account_login=installation.account.login if installation.account else None,
             repository_selection=installation.repository_selection,
         )
-        for installation in client.list_installations()
+        for installation in repository_service.installations_for(user, client)
     ]
 
 

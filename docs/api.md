@@ -202,6 +202,13 @@ Reconciles the local `repositories` rows with what the installation can see:
 inserts new ones, updates renames, deactivates ones that disappeared. Returns
 counts of each.
 
+The installation must belong to **your** linked GitHub identity — an id you do
+not own answers `404`, exactly like one that does not exist. Without that check
+the endpoint is an authorization hole: DevPilot authenticates to GitHub as the
+*App*, so it would happily mint a token for any installation id it was handed
+and list a stranger's private repositories into your account. See tradeoff 107.
+A user who has not linked GitHub owns no installations and can sync nothing.
+
 Rows are keyed on **(owner_id, github_repo_id)**. Two users tracking the same
 repository each get their own row — under the original global constraint the
 second user's sync silently inserted nothing and their dashboard was empty. See

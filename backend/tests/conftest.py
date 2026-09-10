@@ -187,6 +187,33 @@ def registered_user(db_session: Session) -> User:
 
 
 @pytest.fixture
+def github_linked_user(registered_user: User, db_session: Session) -> User:
+    """A user whose GitHub identity matches the mock installation's account.
+
+    Kept separate from `registered_user` because "signed in" and "has connected
+    GitHub" are genuinely different states, and the difference is now load
+    bearing: syncing an installation requires the caller to own it.
+    """
+    from app.integrations.github.mock import MOCK_ACCOUNT
+
+    registered_user.github_id = MOCK_ACCOUNT.id
+    registered_user.github_login = MOCK_ACCOUNT.login
+    db_session.commit()
+    return registered_user
+
+
+@pytest.fixture
+def linked_auth_headers(client: TestClient, github_linked_user: User) -> dict[str, str]:
+    """Authorization header for a user who has connected GitHub."""
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": github_linked_user.email, "password": TEST_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+@pytest.fixture
 def auth_headers(client: TestClient, registered_user: User) -> dict[str, str]:
     """Authorization header carrying a valid token for `registered_user`."""
     response = client.post(

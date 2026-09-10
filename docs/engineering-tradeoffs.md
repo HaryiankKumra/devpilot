@@ -1945,3 +1945,57 @@ Both say why.
 **How it was found:** the first CI run in which the end-to-end job executed at
 all. It had been skipped on every previous run because the backend job failed
 first, so this had been latent since the tests were written.
+
+## 107. An installation id from a request body is checked against its owner
+
+**The bug:** `POST /api/v1/repositories/sync` took `installation_id` from the
+request body and passed it straight to GitHub. Nothing verified that the
+installation belonged to the caller.
+
+That is a broken-authorization hole, and a nastier one than it first looks,
+because **DevPilot authenticates to GitHub as the App, not as the user**. The
+App holds a private key and can mint an installation token for *any* of its
+installations. So an authenticated DevPilot user could send somebody else's
+installation id and have DevPilot fetch, on their behalf, that person's
+repository list -- names, privacy flags, default branches -- and store it under
+their own account. Installation ids are sequential nine-digit integers, so
+guessing is no obstacle. `GET /repositories/installations` made it easier still:
+it returned **every** installation of the App, complete with account logins, to
+any signed-in user.
+
+The consequences compound. A repository row the attacker now owns can be indexed
+via `POST /repositories/{id}/index`, which fetches **file contents** -- so the
+hole reaches source code, not just metadata.
+
+**Chosen:** `installations_for(user, client)` filters GitHub's list to
+installations whose account id equals the user's linked `github_id`, and sync
+refuses anything not in that list. Both endpoints share the one definition of
+"yours", so they cannot drift apart.
+
+**Why the account id and not the login:** logins are renameable and reusable;
+numeric ids are not. Matching on a login means a renamed account can inherit
+someone else's installations.
+
+**Why 404 and not 403:** confirming that an installation exists is itself
+information the caller has not earned. A real id they do not own answers exactly
+like an invented one, and a test asserts the two responses are byte-identical.
+
+**Why an unlinked user owns nothing:** with no `github_id` there is nothing to
+match against, so DevPilot cannot know any installation is theirs. Returning
+empty is the honest answer rather than a convenient one.
+
+**Cost:** installations owned by an *organisation* are now refused, because the
+installing account is the org and the user's `github_id` is their personal id.
+The correct fix for that is `GET /user/installations` called with the user's own
+OAuth token, which is scoped by GitHub itself -- but DevPilot deliberately does
+not store user access tokens, keeping only the identity. Supporting orgs
+therefore means storing a token, which is a real security tradeoff of its own and
+was not worth making silently. **Revisit when** an organisation actually needs
+it.
+
+**How it was found:** connecting a real GitHub App. A sync of 42 repositories
+had plainly succeeded, yet `select ... from users where github_id is not null`
+returned no rows -- the sync had worked for an account with no linked GitHub
+identity at all, which it should never have been able to do. No test caught it
+because every test supplied the one installation the mock exposes; the hole is
+only visible when the id and the caller can disagree.

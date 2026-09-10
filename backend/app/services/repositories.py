@@ -21,7 +21,7 @@ from app.db.models.repository import Repository
 from app.db.models.user import User
 from app.db.repositories.repository import RepositoryStore
 from app.integrations.github.client import GitHubClient
-from app.integrations.github.models import GitHubRepository
+from app.integrations.github.models import GitHubInstallation, GitHubRepository
 
 logger = get_logger(__name__)
 
@@ -80,6 +80,30 @@ def upsert_repository(
     return existing, False
 
 
+def installations_for(owner: User, client: GitHubClient) -> list[GitHubInstallation]:
+    """The App installations belonging to this user's linked GitHub identity.
+
+    `client.list_installations()` returns every installation of the *App*, which
+    in a deployment with more than one user means everybody's. Filtering here is
+    what stops one user seeing -- or syncing from -- another's installation.
+
+    A user who has not linked a GitHub identity owns no installations, which is
+    the honest answer: DevPilot has nothing to match against, so it cannot know
+    that any installation is theirs.
+
+    Matching on the account id rather than the login is deliberate: logins can be
+    renamed and reused, numeric ids cannot.
+    """
+    if owner.github_id is None:
+        return []
+
+    return [
+        installation
+        for installation in client.list_installations()
+        if installation.account is not None and installation.account.id == owner.github_id
+    ]
+
+
 def sync_installation_repositories(
     session: Session,
     *,
@@ -93,7 +117,22 @@ def sync_installation_repositories(
     would cascade to their pull requests, reviews and findings, discarding
     history that is still worth reading -- and an app is often uninstalled and
     reinstalled, at which point the same rows come back.
+
+    The installation id arrives in a request body, so it is checked against the
+    caller's own installations before it is used. Without that check the endpoint
+    is an authorization hole: DevPilot authenticates to GitHub as the *App*, not
+    as the user, so it will cheerfully mint a token for any installation id it is
+    handed and list somebody else's private repositories into the caller's
+    account. Installation ids are sequential integers, so guessing them is not a
+    meaningful obstacle.
     """
+    if not any(
+        installation.id == installation_id for installation in installations_for(owner, client)
+    ):
+        # 404 rather than 403: confirming that an installation exists is itself
+        # information the caller has not earned.
+        raise NotFoundError("No such installation for this account.")
+
     remote_repositories = client.list_installation_repositories(installation_id)
 
     created = 0

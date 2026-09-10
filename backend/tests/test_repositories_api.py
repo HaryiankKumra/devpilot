@@ -32,9 +32,9 @@ class TestAuthorisation:
 
 class TestListInstallations:
     def test_lists_what_the_client_can_see(
-        self, client: TestClient, auth_headers: dict[str, str]
+        self, client: TestClient, linked_auth_headers: dict[str, str]
     ) -> None:
-        response = client.get(INSTALLATIONS, headers=auth_headers)
+        response = client.get(INSTALLATIONS, headers=linked_auth_headers)
 
         assert response.status_code == 200
         body = response.json()
@@ -42,12 +42,94 @@ class TestListInstallations:
         assert body[0]["account_login"] == "devpilot-demo"
 
 
-class TestSync:
-    def test_creates_rows_for_every_repository(
+class TestInstallationAuthorisation:
+    """Regression: an installation id arrives in a request body.
+
+    DevPilot authenticates to GitHub as the *App*, not as the user, so an
+    unchecked id means it will mint an installation token for whatever it is
+    handed and list somebody else's private repositories into the caller's
+    account. Installation ids are sequential integers, so guessing is no
+    obstacle. Found when a real App was connected and a sync succeeded for an
+    account whose GitHub identity was never linked.
+    """
+
+    def test_an_unlinked_user_sees_no_installations(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """GitHub's endpoint lists every installation of the App -- with more
+        than one user that is everybody's, logins and ids included."""
+        response = client.get(INSTALLATIONS, headers=auth_headers)
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_a_different_identity_sees_no_installations(
+        self,
+        client: TestClient,
+        auth_headers: dict[str, str],
+        registered_user: User,
+        db_session: Session,
+    ) -> None:
+        registered_user.github_id = 999_999_999
+        registered_user.github_login = "somebody-else"
+        db_session.commit()
+
+        assert client.get(INSTALLATIONS, headers=auth_headers).json() == []
+
+    def test_an_unlinked_user_cannot_sync(
         self, client: TestClient, auth_headers: dict[str, str]
     ) -> None:
         response = client.post(
             SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=auth_headers
+        )
+
+        assert response.status_code == 404
+
+    def test_cannot_sync_someone_elses_installation(
+        self,
+        client: TestClient,
+        auth_headers: dict[str, str],
+        registered_user: User,
+        db_session: Session,
+    ) -> None:
+        registered_user.github_id = 999_999_999
+        db_session.commit()
+
+        response = client.post(
+            SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=auth_headers
+        )
+
+        assert response.status_code == 404
+
+    def test_a_refused_sync_writes_nothing(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """The point is that no rows are created, not merely that the response
+        is an error."""
+        client.post(SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=auth_headers)
+
+        assert client.get(REPOSITORIES, headers=auth_headers).json() == []
+
+    def test_refused_and_missing_are_indistinguishable(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Confirming an installation exists is information the caller has not
+        earned, so a real id they do not own answers like an invented one."""
+        real = client.post(
+            SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=auth_headers
+        )
+        invented = client.post(SYNC, json={"installation_id": 424_242}, headers=auth_headers)
+
+        assert real.status_code == invented.status_code == 404
+        assert real.json() == invented.json()
+
+
+class TestSync:
+    def test_creates_rows_for_every_repository(
+        self, client: TestClient, linked_auth_headers: dict[str, str]
+    ) -> None:
+        response = client.post(
+            SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=linked_auth_headers
         )
 
         assert response.status_code == 200
@@ -57,38 +139,45 @@ class TestSync:
             "deactivated": 0,
         }
 
-    def test_is_idempotent(self, client: TestClient, auth_headers: dict[str, str]) -> None:
+    def test_is_idempotent(self, client: TestClient, linked_auth_headers: dict[str, str]) -> None:
         """Syncing twice must update, never duplicate."""
         payload = {"installation_id": MOCK_INSTALLATION_ID}
-        client.post(SYNC, json=payload, headers=auth_headers)
+        client.post(SYNC, json=payload, headers=linked_auth_headers)
 
-        second = client.post(SYNC, json=payload, headers=auth_headers)
+        second = client.post(SYNC, json=payload, headers=linked_auth_headers)
 
         assert second.json() == {
             "created": 0,
             "updated": len(MOCK_REPOSITORIES),
             "deactivated": 0,
         }
-        listed = client.get(REPOSITORIES, headers=auth_headers).json()
+        listed = client.get(REPOSITORIES, headers=linked_auth_headers).json()
         assert len(listed) == len(MOCK_REPOSITORIES)
 
     def test_stores_the_installation_id(
-        self, client: TestClient, auth_headers: dict[str, str]
+        self, client: TestClient, linked_auth_headers: dict[str, str]
     ) -> None:
         """Needed later to mint a token scoped to this repository."""
-        client.post(SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=auth_headers)
+        client.post(
+            SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=linked_auth_headers
+        )
 
-        listed = client.get(REPOSITORIES, headers=auth_headers).json()
+        listed = client.get(REPOSITORIES, headers=linked_auth_headers).json()
         assert all(item["installation_id"] == MOCK_INSTALLATION_ID for item in listed)
 
     def test_reports_an_unknown_installation_as_not_found(
-        self, client: TestClient, auth_headers: dict[str, str]
+        self, client: TestClient, linked_auth_headers: dict[str, str]
     ) -> None:
-        """A bad installation id must not surface as a 500 with a traceback."""
-        response = client.post(SYNC, json={"installation_id": 999}, headers=auth_headers)
+        """A bad installation id must not surface as a 500 with a traceback.
+
+        The ownership check refuses it before GitHub is contacted at all, so the
+        code is DevPilot's own `not_found` rather than `github_not_found` -- an
+        id that is not the caller's is not worth an API call.
+        """
+        response = client.post(SYNC, json={"installation_id": 999}, headers=linked_auth_headers)
 
         assert response.status_code == 404
-        assert response.json()["error"]["code"] == "github_not_found"
+        assert response.json()["error"]["code"] == "not_found"
 
 
 class TestSyncKeyedOnGitHubId:
@@ -116,14 +205,14 @@ class TestSyncKeyedOnGitHubId:
 
 class TestDeactivation:
     def test_a_repository_no_longer_visible_is_deactivated_not_deleted(
-        self, db_session: Session, registered_user: User
+        self, db_session: Session, github_linked_user: User
     ) -> None:
         """Deleting would cascade to reviews and findings, discarding history
         that is still worth reading after an uninstall."""
         vanished = MOCK_REPOSITORIES[0].model_copy(update={"id": 987_654})
         repository_service.upsert_repository(
             db_session,
-            owner=registered_user,
+            owner=github_linked_user,
             remote=vanished,
             installation_id=MOCK_INSTALLATION_ID,
         )
@@ -133,14 +222,14 @@ class TestDeactivation:
 
         result = repository_service.sync_installation_repositories(
             db_session,
-            owner=registered_user,
+            owner=github_linked_user,
             client=MockGitHubClient(),
             installation_id=MOCK_INSTALLATION_ID,
         )
         db_session.commit()
 
         assert result.deactivated == 1
-        still_present = repository_service.list_repositories(db_session, owner=registered_user)
+        still_present = repository_service.list_repositories(db_session, owner=github_linked_user)
         deactivated = [r for r in still_present if r.github_repo_id == 987_654]
         assert len(deactivated) == 1
         assert deactivated[0].is_active is False
@@ -207,12 +296,14 @@ class TestOwnershipIsolation:
 
 class TestGetRepository:
     def test_returns_a_synced_repository(
-        self, client: TestClient, auth_headers: dict[str, str]
+        self, client: TestClient, linked_auth_headers: dict[str, str]
     ) -> None:
-        client.post(SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=auth_headers)
-        listed = client.get(REPOSITORIES, headers=auth_headers).json()
+        client.post(
+            SYNC, json={"installation_id": MOCK_INSTALLATION_ID}, headers=linked_auth_headers
+        )
+        listed = client.get(REPOSITORIES, headers=linked_auth_headers).json()
 
-        response = client.get(f"{REPOSITORIES}/{listed[0]['id']}", headers=auth_headers)
+        response = client.get(f"{REPOSITORIES}/{listed[0]['id']}", headers=linked_auth_headers)
 
         assert response.status_code == 200
         assert response.json()["full_name"] == listed[0]["full_name"]
