@@ -1,7 +1,9 @@
 """Shared pytest fixtures.
 
-The suite builds its own `Settings` and passes them to `create_app()`, so it
-never depends on a developer's local `.env`.
+The suite builds its own `Settings` and passes them to `create_app()`, and
+`_hermetic_environment` below hides every `DEVPILOT_*` variable, so it depends
+on neither a developer's local `.env` nor whatever the surrounding shell or CI
+runner happens to export.
 
 Database tests run against an in-memory SQLite database rather than PostgreSQL,
 which keeps them fast and runnable with no services installed. The tradeoff is
@@ -41,6 +43,35 @@ from app.main import create_app
 
 # `code_chunks` stores a pgvector column, which has no SQLite equivalent.
 SQLITE_UNSUPPORTED_TABLES = frozenset({"code_chunks"})
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_environment() -> Iterator[None]:
+    """Hide every `DEVPILOT_*` variable from the tests.
+
+    `Settings(_env_file=None)` stops pydantic-settings reading `.env`, but it
+    still reads `os.environ` -- so a test asserting on a *default* actually
+    asserts on whatever the surrounding shell happens to export. Two tests in
+    `test_config.py` did exactly that: they passed everywhere until CI set
+    `DEVPILOT_SECRET_KEY` at the workflow level, and then failed claiming the
+    production secret guard was broken when the guard was fine.
+
+    That is a bad failure to debug, because the test is correct, the code is
+    correct, and only the environment differs. Clearing the variables for the
+    whole session makes the suite depend on nothing but its own fixtures.
+
+    `DEVPILOT_TEST_DATABASE_URL` is unaffected: it is read into
+    `INTEGRATION_DATABASE_URL` at import time, before this fixture runs, so the
+    integration tests still find the database CI points them at.
+    """
+    saved = {name: value for name, value in os.environ.items() if name.startswith("DEVPILOT_")}
+    for name in saved:
+        del os.environ[name]
+
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 def portable_tables() -> list[Table]:

@@ -14,10 +14,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Never the real key. Production refuses to start on the placeholder; CI is
-  # not production, and a real secret in a workflow file would be a leak.
-  DEVPILOT_SECRET_KEY: ci-secret-key-not-used-anywhere-real-000000
   DEVPILOT_ENVIRONMENT: ci
+  # Deliberately no DEVPILOT_SECRET_KEY here. Nothing in CI needs one -- the
+  # tests build their own Settings, and only `production` demands a real
+  # secret -- and setting it at workflow level made it visible to every test
+  # process, which broke the two tests that assert on the *default* key. The
+  # suite is now hermetic (see tests/conftest.py), so this would no longer
+  # break anything; it is still absent because an unused secret in a workflow
+  # file is only ever a liability.
 
 jobs:
   backend:
