@@ -38,6 +38,10 @@ dependencies = [
     # Official Anthropic SDK. `messages.parse` gives schema-constrained,
     # Pydantic-validated output, which is the whole LLM contract here.
     "anthropic>=0.40",
+    # Google GenAI SDK. Gemini is the provider with a free tier, and its
+    # `response_schema` accepts a Pydantic model directly, so the structured
+    # output contract is identical to the Anthropic path.
+    "google-genai>=2.22,<3.0",
 ]
 
 [project.optional-dependencies]

@@ -63,7 +63,8 @@ account, and a placeholder secret is a leaked key by definition.
 | `DEVPILOT_GITHUB_APP_PRIVATE_KEY_PATH` | Path to the mounted `.pem` |
 | `DEVPILOT_GITHUB_WEBHOOK_SECRET` | The secret registered on the App |
 | `DEVPILOT_GITHUB_CLIENT_ID` / `_SECRET` | OAuth credentials |
-| `DEVPILOT_ANTHROPIC_API_KEY` | Only if `DEVPILOT_LLM_MODE=live` |
+| `DEVPILOT_GEMINI_API_KEYS` | Only if `DEVPILOT_LLM_MODE=gemini` (free tier) |
+| `DEVPILOT_ANTHROPIC_API_KEY` | Only if `DEVPILOT_LLM_MODE=anthropic` (paid) |
 | `DEVPILOT_VOYAGE_API_KEY` | Only if `DEVPILOT_EMBEDDING_MODE=live` |
 
 `.env.prod` is git-ignored by the `.env.*` rule. Keep it out of the image too —
@@ -242,7 +243,8 @@ Postgres `max_connections` (100 by default). At the shipped values that is
 
 ### Cost control
 
-`DEVPILOT_LLM_MODE=live` bills per review. Before enabling it:
+`DEVPILOT_LLM_MODE=anthropic` bills per review; `gemini` runs on a free tier.
+Before enabling the paid provider:
 
 - set a spend limit in the Anthropic console — it is the only hard stop;
 - consider `DEVPILOT_LLM_EFFORT=medium`, which is usually enough for routine
@@ -269,7 +271,7 @@ tests use.
 - [ ] `/health/ready` returns 200
 - [ ] A test webhook produces a completed review
 - [ ] `pg_dump` backup taken and restored once
-- [ ] Spend limit set if `LLM_MODE=live`
+- [ ] Spend limit set if `LLM_MODE=anthropic`
 
 ---
 

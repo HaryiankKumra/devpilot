@@ -72,6 +72,9 @@ services:
       # image -- otherwise `alembic upgrade head` silently runs the version
       # that was baked in at build time.
       - ./backend/alembic:/app/alembic:ro
+      # Operational scripts, for the same reason: editing one should not need a
+      # rebuild before `docker compose exec` can run it.
+      - ./backend/scripts:/app/scripts:ro
     command:
       ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     depends_on:
@@ -95,6 +98,7 @@ services:
     volumes:
       - ./backend/app:/app/app:ro
       - ./backend/alembic:/app/alembic:ro
+      - ./backend/scripts:/app/scripts:ro
     # `--concurrency=2` keeps two reviews in flight per worker. Reviews are
     # I/O-bound (GitHub, then the LLM), so processes mostly wait; more than a
     # couple would multiply memory for little throughput.

@@ -1600,3 +1600,280 @@ end to end through that same container -- which is precisely why it went
 unnoticed. It is the fifth bug in this project that was invisible to a green test
 suite and obvious the moment someone read what the running containers said about
 themselves.
+
+## 94. Two real LLM providers behind one Protocol
+
+**Chosen:** `DEVPILOT_LLM_MODE` is `mock | anthropic | gemini`, and both real
+providers implement the same `LLMProvider` Protocol.
+
+**Alternative:** pick one vendor and call its SDK from the pipeline.
+
+**Why:** the Protocol was written in Milestone 7 on the argument that the
+pipeline should not know which vendor answers. Adding Gemini is what tested that
+claim, and the answer was one new file, one factory branch, and no change
+whatsoever to the pipeline, the prompt, the validation pass or the risk score.
+An abstraction that has never been used twice is a guess; this one is now
+evidence.
+
+The practical driver is cost. Gemini has a free tier and Claude does not, so
+without a second provider the project is only runnable by someone willing to pay
+per review -- which for a portfolio project means it is mostly not run at all.
+
+**Cost:** two providers to keep working, and two sets of failure semantics to
+map. The mapping is where the real work is (entry 96), and it is covered by
+tests that need no key and no network.
+
+## 95. The mode names the provider, rather than a separate `live` switch
+
+**Chosen:** one setting whose values are `mock`, `anthropic`, `gemini`.
+
+**Alternative:** keep `LLM_MODE=mock|live` and add `LLM_PROVIDER=anthropic|gemini`.
+
+**Why:** "real or mocked" and "which vendor" are the same decision, and two
+settings that encode one decision can contradict each other --
+`LLM_MODE=mock` with `LLM_PROVIDER=gemini` has no meaning, and something has to
+decide which wins. One setting with three values cannot be in an invalid state.
+
+The model name follows the provider unless it is set explicitly, because the
+failure it prevents is nasty: switching mode to `gemini` and forgetting
+`LLM_MODEL` sends `claude-opus-5` to Google and fails with "model not found",
+which reads like a broken integration rather than a one-line mistake.
+
+**Cost:** renaming `live` broke nothing here because the project was not yet
+deployed. In a released product this would need a deprecation period.
+
+## 96. Gemini's schema is the same Pydantic model
+
+**Chosen:** `response_schema=LLMReview` -- the same class sent on the Anthropic
+path -- with `response_mime_type="application/json"`.
+
+**Alternative:** hand-write the OpenAPI-subset schema Gemini documents.
+
+**Why:** Gemini accepts a narrower schema dialect than the one Pydantic emits: no
+`$defs`/`$ref`, no `additionalProperties`, and `nullable: true` instead of
+`anyOf`. That looked like it needed a translation layer, so it was worth
+checking rather than assuming -- and the SDK already performs exactly that
+conversion, inlining the definitions, dropping `additionalProperties` and
+rewriting optionals, while preserving the enums and the length and range
+constraints.
+
+Keeping one schema matters beyond convenience: it means a review cannot differ in
+shape depending on who generated it, so every downstream guarantee -- the
+severity enum, the confidence range, the 25-finding cap -- holds identically for
+both vendors.
+
+**Cost:** dependence on the SDK's conversion being faithful. A test asserts the
+Pydantic model itself is what gets sent, so a future SDK that stopped converting
+would fail loudly rather than silently drop a constraint.
+
+## 97. Rotating a pool of API keys
+
+**Chosen:** the Gemini provider draws keys from an `ApiKeyPool` that
+round-robins, parks a key that returns 429 until its cool-down expires, and
+permanently retires one that returns 401 or 403.
+
+**Why:** free-tier quota is metered per key, so rotation is the difference
+between a pipeline that runs and one that spends its day rate-limited.
+
+Three details each prevent a specific failure:
+
+* **Round-robin on every request, not only on failure.** Limits are per *minute*,
+  so the goal is to spread load. Failover-only rotation pins key one at its
+  limit while the rest sit idle.
+* **Cool-down on 429, using the provider's own `retryDelay`.** Without it,
+  rotation walks back onto the exhausted key a few requests later. Guessing a
+  fixed wait either wastes quota or fails again immediately.
+* **Disable on 401/403.** A revoked or mistyped key never starts working, so
+  retrying it every Nth request converts a configuration mistake into a
+  permanent one-in-N failure rate.
+
+Keys never reach the logs; a key is identified by its position in the pool, so a
+log line can say *which* key misbehaved without putting the secret into a log
+aggregator.
+
+**Cost:** the pool is per-process, and Celery's prefork workers are separate
+processes, so N workers hold N independent views and spread load approximately
+rather than exactly. The failure mode is benign and self-correcting -- a second
+process tries a parked key, gets a 429, and parks it too. Moving the cool-down
+into Redis, which this project already runs for rate limiting, is the fix if
+quota ever gets tight enough to justify the coupling.
+
+**Revisit when:** worker concurrency is high enough that the approximation
+actually wastes quota.
+
+## 98. An exhausted key pool is a rate limit, not a failure
+
+**Chosen:** when every key is cooling down, the provider raises
+`LLMRateLimitError` carrying the shortest remaining wait.
+
+**Alternative:** raise a configuration error, or fail the job.
+
+**Why:** the worker already knows how to handle a rate limit -- back off for the
+stated interval and retry -- and quota returns on its own. Failing the job would
+discard work that will be perfectly possible in thirty seconds. Reporting the
+*shortest* wait rather than the longest matters for the same reason: waiting 90
+seconds when a key frees up in 30 wastes a minute of a quota that is already
+scarce.
+
+**Cost:** a genuinely misconfigured deployment (every key invalid) retries a few
+times before giving up, rather than failing immediately. The pool distinguishes
+the two cases in its message, and a rejected key is disabled rather than cooled,
+so that path ends quickly.
+
+## 99. Gemini's HTTP 200 failures are checked explicitly
+
+**Chosen:** the provider inspects `prompt_feedback.block_reason` and the
+candidate's `finish_reason` before reading any content, and re-validates the
+parsed result against `LLMReview`.
+
+**Why:** a safety block and a truncated generation both arrive as **HTTP 200**.
+A provider that only maps status codes treats a refused review as a successful
+one and stores an empty summary as though the model had nothing to say.
+
+The three outcomes are deliberately different exceptions, because the correct
+response differs: a refusal is permanent (re-asking an identical refused prompt
+gets refused again), a truncation is a configuration problem and says so by
+naming `DEVPILOT_LLM_MAX_OUTPUT_TOKENS`, and a malformed body is worth one more
+attempt because generation is stochastic.
+
+Re-validating rather than trusting `response.parsed` follows the project's
+standing rule that model output is checked at the boundary: the SDK hands back a
+plain dict when it cannot instantiate the model, and a review that skipped
+validation is exactly what this pipeline refuses to build on.
+
+**Cost:** more code than reading `response.text`, and it depends on finish-reason
+names that could change. Unknown reasons fall through to "stopped unexpectedly"
+rather than being treated as success.
+
+## 100. Gemini gets the schema in the prompt, not as a response schema
+
+**Chosen:** the Gemini provider sends `response_mime_type="application/json"` and
+puts the JSON Schema, generated from `LLMReview`, into the system instruction.
+The response is validated against `LLMReview` on the way back.
+
+**Alternative (and the first three attempts):** Gemini's structured-output
+fields, which are the direct counterpart to the Anthropic path's
+`output_format=LLMReview`.
+
+**Why:** the schema could not be made to work, and the API would not say why.
+
+1. Passing the Pydantic model sends `additionalProperties` (from
+   `extra="forbid"`), which the Developer API has no field for:
+   `400 Unknown name "additional_properties"`.
+2. With that stripped recursively, `response_schema` still fails on Gemini 3.x
+   with a bare `400 INVALID_ARGUMENT` naming no field.
+3. `response_json_schema`, the SDK's documented modern replacement, fails the
+   same way.
+4. A *trivial* schema is accepted on the same model, and so is a nested
+   object-in-array with length caps. So the rejection is some specific feature
+   of this schema -- enums, `anyOf` nullables and nested `$defs` are the
+   remaining candidates -- and each additional probe costs free-tier quota to
+   learn one bit.
+
+Binary-searching an undocumented vendor dialect would produce a schema that is
+correct today and breaks at the next model generation, which is the same bet
+that had already failed twice. Putting the schema in the prompt works on every
+Gemini model, and `response_mime_type` -- which *is* accepted everywhere -- still
+prevents the most common parse failure, a JSON object wrapped in prose or a
+markdown fence.
+
+The weaker guarantee is real: the model is asked rather than constrained. It is
+backed by the two mechanisms this project already had for exactly this --
+validation of every response against `LLMReview`, and
+`llm_max_validation_retries` when generation wanders. The rule was never that
+the provider guarantees the shape; it was that *we* check it. Anthropic's
+`output_format` was a bonus, not the guarantee.
+
+The schema text is generated from `LLMReview` rather than hand-written, so a
+prompt that promises one shape while the validator demands another -- a bug that
+surfaces only as inexplicable validation failures -- cannot happen.
+
+**Cost:** a few hundred prompt tokens per review, and more malformed responses
+than a constrained decoder would produce. Measured on the first real call: 808
+input tokens, and the review was correct.
+
+**Revisit when:** Gemini documents which schema features it accepts, or the SDK
+starts reporting which field was rejected.
+
+## 101. A narrow JSON repair for stray backslashes
+
+**Chosen:** when a response fails to parse, invalid escape sequences are doubled
+and the parse is retried once. Only then, and never on output that already
+parses.
+
+**Why:** the very first successful Gemini call returned a complete, correct
+review -- SQL injection at line 4, plaintext password comparison at line 6, both
+right -- and it was thrown away because one backslash inside a string was not
+doubled. A reviewer quotes code constantly, and code is full of backslashes:
+regexes, Windows paths, LaTeX. This is not a rare accident; it is a systematic
+tendency, so retrying would likely reproduce it while spending more quota.
+
+Doubling is provably what the model meant, because a literal backslash is the
+only thing an invalid escape *can* have been -- JSON permits exactly
+`" \ / b f n r t uXXXX`, and everything else is a syntax error rather than an
+ambiguity.
+
+The leniency is deliberately scoped to **JSON syntax**, not to what a review may
+contain: the repaired text is still validated against `LLMReview`, so a
+well-formed document with wrong content is rejected exactly as before. A test
+pins that distinction.
+
+**Cost:** a repair path that could, in principle, alter a string the model
+intended differently. The no-op-on-valid-input test bounds the risk, and the
+repair is logged at warning level, so if it starts firing often the answer is to
+fix the prompt rather than lean harder on the repair.
+
+## 102. Testing a wire format means testing the wire, not the object
+
+**Chosen:** the Gemini schema and prompt tests assert on serialised output, and
+checked **both** the `additional_properties` and `additionalProperties`
+spellings while that code existed.
+
+**Why:** the original test asserted the converted schema contained no
+`additionalProperties` -- and passed, while the live call failed on exactly that
+field. The SDK names it `additional_properties` in Python and normalises it to
+camelCase on the way out, so checking one spelling reported a clean schema while
+the other spelling travelled. A green test beside a broken request is the worst
+possible signal, because it actively discourages looking at the right place.
+
+The general lesson outlived the specific fix: when the thing under test is a
+*wire format*, asserting on the in-memory object tests the wrong artefact.
+
+**Cost:** string matching against serialised output is cruder than attribute
+assertions and would not catch a merely-wrong value. Pairing it with structural
+assertions covers both.
+
+## 103. `PYTHONPATH=/app` so the mounted source is the one that runs
+
+**Chosen:** the image sets `PYTHONPATH=/app`.
+
+**Why:** the image contains **two copies** of the application. `pip install .`
+puts one in `site-packages`, and `COPY app ./app` puts another at `/app/app`.
+Which one `import app` finds depends on `sys.path[0]`, which Python sets to the
+directory of the script being run:
+
+* `python -c "import app"` -- `sys.path[0]` is the working directory, so the
+  bind-mounted `/app/app` wins.
+* `python scripts/check_llm.py` -- `sys.path[0]` is `/app/scripts`, so
+  `site-packages` wins and the code that runs is whatever was baked at build
+  time.
+
+The failure this produces is genuinely nasty: edits to mounted source appear to
+do nothing, there is no error, and a check run one way disagrees with the same
+check run the other way. It cost several rounds of debugging a fix that was
+already correct -- the fix simply was not the code being executed.
+
+Putting `/app` on `PYTHONPATH` places it ahead of `site-packages` for *every*
+entry point, so the mounted source is authoritative for uvicorn, celery and any
+script alike. In production, where nothing is mounted, the two copies are
+identical and this changes nothing.
+
+**Alternative:** stop installing the application into `site-packages` at all,
+leaving only `/app/app`. That removes the duplicate rather than ordering around
+it, and is the tidier answer -- but `pip install .` is also how the dependencies
+in `pyproject.toml` get resolved, so it would mean maintaining a separate
+requirements file purely to avoid installing one package.
+
+**Cost:** the duplicate still exists; `PYTHONPATH` only decides which wins.
+**Revisit when:** the build is restructured, at which point deleting the
+installed copy is the better fix.

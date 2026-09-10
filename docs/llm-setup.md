@@ -14,9 +14,9 @@ threshold, so a mocked finding can never be posted to a real pull request.
 
 This document is for when you want real reviews.
 
-- [What you need](#what-you-need)
-- [Step 1 — get an API key](#step-1--get-an-api-key)
-- [Step 2 — configure DevPilot](#step-2--configure-devpilot)
+- [Choosing a provider](#choosing-a-provider)
+- [Gemini — the free option](#gemini--the-free-option)
+- [Anthropic — the paid option](#anthropic--the-paid-option)
 - [Step 3 — verify](#step-3--verify)
 - [What a review costs](#what-a-review-costs)
 - [Controlling spend](#controlling-spend)
@@ -25,22 +25,94 @@ This document is for when you want real reviews.
 
 ---
 
-## What you need
+## Choosing a provider
 
-One value: an Anthropic API key. Unlike the GitHub App there is no registration
-flow, no webhook, and no tunnel — the calls are outbound only.
+`DEVPILOT_LLM_MODE` names the provider. There is no separate "live" switch,
+because "which vendor" and "real or mocked" are one decision — two settings
+could contradict each other.
 
-| Setting | Purpose |
+| Mode | Cost | Notes |
+| --- | --- | --- |
+| `mock` | Free | Default. No key, no network, deterministic. |
+| `gemini` | **Free tier** | Google Gemini. Good enough for real reviews at no cost. |
+| `anthropic` | Paid per review | Claude. The strongest reviews here. |
+
+Both real providers implement the same `LLMProvider` Protocol, so **nothing else
+in the pipeline changes**: the same prompt, the same Pydantic schema, the same
+validation pass that discards findings the diff does not support, and the same
+deterministic risk score. Switching vendors is one environment variable.
+
+Whichever you pick, the calls are outbound only — no registration flow, no
+webhook, no tunnel.
+
+---
+
+## Gemini — the free option
+
+### Step 1 — get one or more keys
+
+1. Sign in at <https://aistudio.google.com>
+2. **Get API key → Create API key**
+3. Copy it. Repeat if you want more than one.
+
+Free-tier limits are applied **per key**, so DevPilot rotates across however
+many you give it. One key is fine; more just means more headroom before you hit
+a per-minute limit.
+
+> Use only keys you legitimately hold. Creating extra Google accounts to
+> multiply free quota is against Google's terms — that is a different thing from
+> rotating keys you already own.
+
+### Step 2 — configure DevPilot
+
+In `.env` (git-ignored — never commit this):
+
+```dotenv
+DEVPILOT_LLM_MODE=gemini
+DEVPILOT_GEMINI_API_KEYS=AIza-first-key,AIza-second-key,AIza-third-key
+```
+
+Comma-separated, no quotes, no spaces needed. Blank entries and duplicates are
+ignored, so a trailing comma is harmless.
+
+Leave `DEVPILOT_LLM_MODEL` blank and it defaults to `gemini-3.6-flash` — flash
+rather than pro because the free tier allows far more requests per day of it, and
+pinned to a version rather than the floating `gemini-flash-latest` alias because
+`reviews.model_name` is stored so results stay comparable.
+
+> `gemini-2.5-flash` is closed to new accounts and answers `404`. If you see
+> that, you are on an older model id.
+
+**On structured output.** The Anthropic path constrains generation to the
+`LLMReview` schema. Gemini rejects this schema in its `response_schema` field —
+see tradeoff 100 — so DevPilot sends the schema *in the prompt* and relies on
+Pydantic validation plus `DEVPILOT_LLM_MAX_VALIDATION_RETRIES` instead. Reviews
+are validated identically either way; Gemini just needs one more round trip
+occasionally.
+
+### How the rotation behaves
+
+| Situation | What happens |
 | --- | --- |
-| `DEVPILOT_LLM_MODE` | `mock` (default, free) or `live` |
-| `DEVPILOT_ANTHROPIC_API_KEY` | Your API key |
-| `DEVPILOT_LLM_MODEL` | Defaults to `claude-opus-5` |
-| `DEVPILOT_LLM_EFFORT` | `low` … `max`; defaults to `high` |
+| Normal request | Next key in the rotation, round-robin |
+| Key returns **429** | Parked until Gemini's own `retryDelay` elapses, then rejoins |
+| Key returns **401/403** | Retired permanently — a revoked key will never start working |
+| Every key unavailable | Reported as a rate limit, so the worker backs off and retries |
 
-**This one costs money.** Every review is a paid API call. Read
-[What a review costs](#what-a-review-costs) before switching to `live`.
+Keys are **never written to logs**. Log lines identify a key by its position
+(`key-2`), so you can see which one misbehaved without the secret reaching a log
+aggregator.
 
-## Step 1 — get an API key
+One honest limitation: the rotation state lives in one process. Celery's prefork
+workers are separate processes, so four workers hold four independent views and
+spread load approximately rather than exactly. The failure mode is benign — a
+second process tries a parked key, gets a 429, and parks it too.
+
+---
+
+## Anthropic — the paid option
+
+### Step 1 — get an API key
 
 1. Sign in at <https://console.anthropic.com>
 2. Add a payment method and, ideally, a **spend limit** — this is the safety net
@@ -49,23 +121,28 @@ flow, no webhook, and no tunnel — the calls are outbound only.
 
 The key starts with `sk-ant-`.
 
-## Step 2 — configure DevPilot
-
-In `.env` (git-ignored — never commit this):
+### Step 2 — configure DevPilot
 
 ```dotenv
-DEVPILOT_LLM_MODE=live
+DEVPILOT_LLM_MODE=anthropic
 DEVPILOT_ANTHROPIC_API_KEY=sk-ant-your-key-here
 ```
 
-Then restart the worker, which is the process that calls the model:
+**This one costs money.** Every review is a paid API call. Read
+[What a review costs](#what-a-review-costs) first.
+
+---
+
+## Restarting
+
+Either way, restart the worker — it is the process that calls the model:
 
 ```bash
 docker compose restart worker
 ```
 
-The API server never calls the model, so it does not need the key. If you are
-deploying the two separately, only the worker needs it.
+The API server never calls the model, so it does not need the key. If you deploy
+the two separately, only the worker needs it.
 
 ## Step 3 — verify
 
@@ -79,7 +156,8 @@ docker compose exec postgres psql -U devpilot -d devpilot \
 
 Two things tell you it worked:
 
-- `model_name` is `claude-opus-5`, not `mock-reviewer`
+- `model_name` is the real model (`gemini-3.6-flash`, `claude-opus-5`), not
+  `mock-reviewer`
 - the summary does **not** begin with `[Mock review …]`
 
 The worker logs the same transition:
@@ -113,6 +191,7 @@ estimated.
 
 | Lever | Effect |
 | --- | --- |
+| `DEVPILOT_LLM_MODE=gemini` | Free tier instead of paid. The biggest lever. |
 | A **spend limit** in the Anthropic Console | The only hard stop. Set one. |
 | `DEVPILOT_LLM_EFFORT=medium` | Less reasoning per review, lower cost |
 | `DEVPILOT_LLM_MODEL=claude-sonnet-5` | Cheaper per token than Opus |
@@ -128,8 +207,8 @@ changes and costs meaningfully less.
 **Reviews still say `[Mock review …]`.** `DEVPILOT_LLM_MODE` is still `mock`, or
 the worker was not restarted. The mode is read at startup.
 
-**Job fails with `LLMConfigurationError`.** `live` mode with no key set. The
-error message names the variable.
+**Job fails with `LLMConfigurationError`.** A real provider selected with no key
+set. The error message names the variable.
 
 **Job fails with `LLMAuthenticationError`.** The key was rejected — wrong value,
 revoked, or no credit on the account. Retrying will not help, which is why it is

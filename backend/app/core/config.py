@@ -33,12 +33,36 @@ MINIMUM_SECRET_KEY_LENGTH = 32
 class LLMMode(StrEnum):
     """How DevPilot reaches a language model.
 
+    The mode names the provider rather than saying `live`, because "which
+    vendor" and "real or mocked" are the same decision here and splitting them
+    into two settings would let them contradict each other.
+
     `mock` returns a fixed, deterministic review so the whole pipeline runs to
-    completion with no API key and no spend. `live` calls the real provider.
+    completion with no API key and no spend. `anthropic` and `gemini` call the
+    respective real providers; Gemini is the one with a free tier.
     """
 
-    LIVE = "live"
     MOCK = "mock"
+    ANTHROPIC = "anthropic"
+    GEMINI = "gemini"
+
+
+# The model used when `DEVPILOT_LLM_MODEL` is not set explicitly.
+#
+# Flash rather than Pro: the free tier allows far more requests per day of it,
+# and this project's prompt does most of the structural work a larger model
+# would otherwise have to infer.
+#
+# Pinned to a specific version rather than the floating `gemini-flash-latest`
+# alias, because `reviews.model_name` is stored so results stay comparable --
+# an alias that silently moves under you makes "did reviews get worse after the
+# upgrade?" unanswerable. Note `gemini-2.5-flash` is closed to new accounts and
+# answers 404, which is why the default is a 3.x model.
+DEFAULT_MODELS: dict[LLMMode, str] = {
+    LLMMode.MOCK: "mock-reviewer",
+    LLMMode.ANTHROPIC: "claude-opus-5",
+    LLMMode.GEMINI: "gemini-3.6-flash",
+}
 
 
 class EmbeddingMode(StrEnum):
@@ -135,12 +159,30 @@ class Settings(BaseSettings):
     llm_mode: LLMMode = LLMMode.MOCK
 
     anthropic_api_key: SecretStr | None = None
-    llm_model: str = "claude-opus-5"
+
+    # One or more Gemini keys, comma-separated. Several are supported because
+    # the free tier is metered per key, and the provider rotates across them.
+    #
+    # Held as a single SecretStr rather than a `list[str]` on purpose:
+    # pydantic-settings JSON-decodes complex types from the environment, so a
+    # plain comma-separated list would fail to parse unless every value were
+    # written as a JSON array in the .env file.
+    gemini_api_keys: SecretStr | None = None
+
+    # Left unset, the model follows the provider (see the validator below).
+    # Setting it explicitly always wins.
+    llm_model: str = ""
 
     # Reviewing code rewards reasoning depth, so this sits at the high end.
     # Typed as a literal so a typo is rejected at startup rather than by the
-    # provider on the first review of the day.
+    # provider on the first review of the day. Anthropic-only; Gemini ignores it.
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+
+    # Low, because reviewing code rewards consistency over variety: the same
+    # diff should not produce a different verdict on a re-run. Not zero, so that
+    # a validation retry has some chance of differing from the attempt it
+    # replaces. Used by providers that expose the knob.
+    llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # Generous enough for a full review with a couple of dozen findings;
     # hitting the cap truncates mid-JSON and wastes the whole call.
@@ -159,6 +201,30 @@ class Settings(BaseSettings):
     @property
     def llm_is_mocked(self) -> bool:
         return self.llm_mode is LLMMode.MOCK
+
+    @property
+    def gemini_api_key_list(self) -> list[str]:
+        """The configured Gemini keys, in the order they were given."""
+        if self.gemini_api_keys is None:
+            return []
+        raw = self.gemini_api_keys.get_secret_value()
+        return [key.strip() for key in raw.split(",") if key.strip()]
+
+    @model_validator(mode="after")
+    def _default_model_to_the_provider(self) -> Settings:
+        """Pick the provider's default model when none was named.
+
+        Without this, switching `DEVPILOT_LLM_MODE` to `gemini` and forgetting
+        to change `DEVPILOT_LLM_MODEL` sends an Anthropic model id to Google and
+        fails with "model not found" -- which reads like a broken integration
+        rather than a one-line configuration mistake.
+        """
+        if self.llm_model:
+            return self
+
+        # `frozen=True`, so assignment goes through the underlying dict.
+        object.__setattr__(self, "llm_model", DEFAULT_MODELS[self.llm_mode])
+        return self
 
     # --- Embeddings ----------------------------------------------------------
     # `mock` needs no credentials; see docs/llm-setup.md.

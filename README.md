@@ -23,9 +23,16 @@ high-confidence findings back to the pull request.
 > [`docs/llm-setup.md`](docs/llm-setup.md) and
 > [`docs/github-app-setup.md`](docs/github-app-setup.md).
 >
-> **Verified, not assumed:** 477 backend tests, 10 Playwright tests driving a
+> **And it runs for free on real reviews too.** `DEVPILOT_LLM_MODE=gemini` uses
+> Google's free tier, rotating across however many API keys you give it and
+> backing off per key when one is throttled. `anthropic` is the paid
+> alternative. Both sit behind the same `LLMProvider` Protocol, so the prompt,
+> the schema validation and the risk score are identical either way — switching
+> vendor is one environment variable.
+>
+> **Verified, not assumed:** 528 backend tests, 10 Playwright tests driving a
 > browser against the real Docker stack, `ruff` and `mypy --strict` clean across
-> 115 source files, and a Locust run of 644 requests with **0 failures**
+> 120 source files, and a Locust run of 644 requests with **0 failures**
 > (P50 15 ms, P95 240 ms, P99 350 ms). Production configuration, CI and
 > deployment docs are in place — see
 > [`docs/deployment.md`](docs/deployment.md).
@@ -116,7 +123,7 @@ for the decisions that could reasonably have gone the other way.
 | Packaging | Docker, Docker Compose, GitHub Actions                              |
 | Testing   | Pytest, Playwright, Locust                                          |
 | Analysis  | Ruff (parser-based, never executes reviewed code)                   |
-| AI        | Claude (`claude-opus-5`), Pydantic-validated structured output      |
+| AI        | Gemini (free tier) or Claude, behind one Protocol; Pydantic-validated structured output |
 
 ## Quick start (Docker)
 
@@ -196,6 +203,10 @@ the codebase reads `os.environ` directly, and no secret has a real default.
 | `DEVPILOT_GITHUB_APP_ID`, `..._PRIVATE_KEY_PATH` | GitHub App identity |
 | `DEVPILOT_GITHUB_WEBHOOK_SECRET` | Verifies incoming webhooks      |
 | `DEVPILOT_GITHUB_CLIENT_ID`, `..._CLIENT_SECRET` | OAuth account linking |
+| `DEVPILOT_LLM_MODE`     | `mock`, `gemini` (free tier) or `anthropic` (paid) |
+| `DEVPILOT_GEMINI_API_KEYS` | One or more keys, comma-separated; rotated round-robin |
+| `DEVPILOT_ANTHROPIC_API_KEY` | Required for `anthropic` mode        |
+| `DEVPILOT_LLM_MODEL`    | Blank follows the provider's default     |
 | `VITE_API_BASE_URL`     | API URL the browser should call          |
 
 ## API
@@ -426,7 +437,7 @@ what keeps business logic testable without HTTP.
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — components and boundaries
-- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 93 decisions, their alternatives, and what each one costs
+- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 103 decisions, their alternatives, and what each one costs
 - [`docs/api.md`](docs/api.md) — endpoint reference and why each one is shaped that way
 - [`docs/database-schema.md`](docs/database-schema.md) — the eight tables, their constraints, and the reasoning
 - [`docs/deployment.md`](docs/deployment.md) — running it in production, and the checklist before you do

@@ -40,6 +40,15 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
+# `pip install .` leaves a copy of `app` in site-packages, and the COPY below
+# puts another at /app/app. Which one an `import app` finds depends on
+# sys.path[0] -- the *script's* directory -- so `python scripts/foo.py` silently
+# imported the baked copy while `python -c` picked up the bind-mounted one. In
+# development that meant edits appeared to do nothing, with no error to explain
+# why. Putting /app on PYTHONPATH makes the mounted source win for every entry
+# point: uvicorn, celery and any script.
+ENV PYTHONPATH=/app
+
 # curl is used by the container healthcheck below.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
@@ -57,6 +66,11 @@ COPY --chown=devpilot:devpilot app ./app
 # them the image can serve traffic but cannot create the schema it needs.
 COPY --chown=devpilot:devpilot alembic.ini ./alembic.ini
 COPY --chown=devpilot:devpilot alembic ./alembic
+
+# Operational scripts ship with the image for the same reason the migrations do:
+# `docker compose exec worker python scripts/check_llm.py` has to run against
+# the exact code the container is running, not a copy on someone's laptop.
+COPY --chown=devpilot:devpilot scripts ./scripts
 
 USER devpilot
 
