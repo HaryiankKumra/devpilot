@@ -1,0 +1,233 @@
+# =============================================================================
+# DevPilot - production stack.
+#
+#   cp .env.example .env.prod   # then fill it in properly (see docs/deployment.md)
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# This is a deliberately separate file rather than an override layered on
+# docker-compose.yml. An override can only add and replace keys, never remove
+# them, so the development bind mounts and `--reload` would survive into
+# production -- and the one thing this file must guarantee is that they do not.
+# Reading it top to bottom tells you exactly what runs in production; reading a
+# merged pair of files does not.
+#
+# What is different from development, and why:
+#
+#   * No source bind mounts. The image is the artefact. If the running code can
+#     be changed without a rebuild, the image tag no longer identifies what is
+#     deployed.
+#   * No `--reload`. The reloader runs a file watcher and a supervisor process
+#     that exist only to restart on edits nobody will make here.
+#   * Postgres and Redis publish no host ports. They are reachable on the
+#     internal network and nowhere else, so a misconfigured host firewall cannot
+#     expose the database.
+#   * Migrations run as a one-shot service that must succeed before the API
+#     starts.
+#   * The frontend is the nginx image serving a built bundle, not a dev server.
+#   * Every service has memory and CPU limits, so one runaway process degrades
+#     itself rather than the host.
+#
+# TLS is not terminated here. Put this behind a reverse proxy (Caddy, nginx,
+# an ALB) that owns the certificate; see docs/deployment.md.
+# =============================================================================
+
+x-api-image: &api-image
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  image: devpilot-api:${DEVPILOT_IMAGE_TAG:-latest}
+
+# The API, the worker and the migration job are all the same image and the same
+# configuration. Sharing an anchor means they cannot drift apart -- a worker
+# pointed at a different database than the API is a bug that takes hours to see.
+x-api-env: &api-env
+  env_file:
+    - .env.prod
+  environment:
+    DEVPILOT_ENVIRONMENT: production
+    DEVPILOT_DEBUG: "false"
+    DEVPILOT_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB}
+    DEVPILOT_REDIS_URL: redis://redis:6379/0
+    # The API sits behind a proxy in this topology, so X-Forwarded-For is the
+    # real client address. This is the only place that is true.
+    DEVPILOT_TRUST_PROXY_HEADERS: "true"
+    DEVPILOT_ENABLE_HSTS: "true"
+
+x-logging: &logging
+  driver: json-file
+  options:
+    # Without a cap, a chatty container fills the host disk and takes every
+    # other service down with it. This has happened to everyone once.
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+    # No `ports:`. Reachable only from the internal network.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    logging: *logging
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # appendonly: queued review jobs survive a restart. maxmemory-policy
+    # noeviction: a queue that silently drops jobs when memory fills is worse
+    # than one that refuses new ones loudly.
+    command:
+      [
+        "redis-server",
+        "--appendonly", "yes",
+        "--maxmemory", "384mb",
+        "--maxmemory-policy", "noeviction",
+      ]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging: *logging
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Migrations run once, before anything serves traffic.
+  #
+  # Deliberately NOT run on API startup. With more than one API replica, every
+  # replica would run `alembic upgrade head` against the same database at the
+  # same time; Alembic takes a lock, so the losers block on boot and a slow
+  # migration turns into a failed deploy. A one-shot job runs exactly once and
+  # fails the deploy loudly if the schema cannot be brought up to date.
+  # ---------------------------------------------------------------------------
+  migrate:
+    <<: [*api-image, *api-env]
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *logging
+    # One-shot: it must exit 0, not be restarted.
+    restart: "no"
+
+  api:
+    <<: [*api-image, *api-env]
+    # Four uvicorn workers in one container. Python's GIL means a single
+    # process cannot use more than one core, and this workload spends most of
+    # its time waiting on Postgres, Redis and GitHub. Note that each worker
+    # opens its own connection pool: workers x DB_POOL_SIZE must stay under
+    # Postgres `max_connections`.
+    #
+    # --proxy-headers makes uvicorn read X-Forwarded-Proto/For from the reverse
+    # proxy, so redirects and logged client IPs are correct.
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host", "0.0.0.0",
+        "--port", "8000",
+        "--workers", "4",
+        "--proxy-headers",
+        "--forwarded-allow-ips", "*",
+        "--no-server-header",
+      ]
+    ports:
+      # Bound to loopback: the reverse proxy on the host reaches it, the
+      # internet does not. Change to "8000:8000" only if something else is
+      # already terminating TLS in front of this host.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+    logging: *logging
+    restart: unless-stopped
+
+  worker:
+    <<: [*api-image, *api-env]
+    command:
+      [
+        "celery",
+        "-A", "app.worker.celery_app:celery_app",
+        "worker",
+        "--loglevel=info",
+        "--concurrency=4",
+        # Restart a worker process after 100 tasks. A long-lived process that
+        # leaks a little memory per review will eventually be killed by the
+        # limit below at an arbitrary moment; recycling makes that predictable
+        # and happens between tasks rather than during one.
+        "--max-tasks-per-child=100",
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "celery", "-A", "app.worker.celery_app:celery_app",
+          "inspect", "ping", "-d", "celery@$$HOSTNAME",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    logging: *logging
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Vite inlines this at build time, so it is a build argument and the
+        # image is environment-specific. Rebuilding is required to change it --
+        # which is the tradeoff for shipping static files with no runtime.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:?set VITE_API_BASE_URL}
+    image: devpilot-frontend:${DEVPILOT_IMAGE_TAG:-latest}
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - api
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+    logging: *logging
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

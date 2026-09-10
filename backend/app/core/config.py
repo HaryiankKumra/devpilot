@@ -192,6 +192,31 @@ class Settings(BaseSettings):
     def embedding_is_mocked(self) -> bool:
         return self.embedding_mode is EmbeddingMode.MOCK
 
+    # --- Rate limiting -------------------------------------------------------
+    rate_limit_enabled: bool = True
+    # Generous for normal use; the point is to stop a runaway client, not to
+    # meter usage.
+    rate_limit_requests: int = Field(default=300, ge=1)
+    # Tight, because this is where credential stuffing happens.
+    rate_limit_auth_requests: int = Field(default=10, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
+
+    # `X-Forwarded-For` is trivially spoofed by the client, so it is honoured
+    # only when the deployment sits behind a proxy that overwrites it. Leaving
+    # this on without such a proxy lets anyone reset their own rate limit.
+    trust_proxy_headers: bool = False
+
+    # --- Security headers ----------------------------------------------------
+    # HSTS is only meaningful over HTTPS, and setting it in local development
+    # would pin `localhost` to https in the browser for a year.
+    enable_hsts: bool = False
+
+    # --- Publishing ----------------------------------------------------------
+    # The master switch for writing to someone else's repository. Off by
+    # default: a misconfigured deployment should be silent, not chatty on
+    # somebody's pull request.
+    post_reviews_to_github: bool = False
+
     # --- Review pipeline limits ----------------------------------------------
     # These bound cost and usefulness, not just resource use. A diff of many
     # thousands of lines produces a prompt no model reads carefully, and the

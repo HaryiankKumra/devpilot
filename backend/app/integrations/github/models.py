@@ -135,3 +135,31 @@ class PullRequestEvent(GitHubModel):
     repository: GitHubRepository
     installation: GitHubInstallationRef | None = None
     sender: GitHubAccount | None = None
+
+
+# --- Outgoing: what DevPilot posts back --------------------------------------
+
+
+class ReviewComment(GitHubModel):
+    """One inline comment on a pull request."""
+
+    path: str
+    line: int = Field(ge=1, description="Line in the new file, 1-based.")
+    body: str
+
+    def to_payload(self) -> dict[str, object]:
+        """Render for the reviews API.
+
+        `side: RIGHT` anchors the comment to the *new* version of the file. The
+        default is also RIGHT, but stating it prevents a comment silently
+        landing on the pre-change side after an API default ever shifts.
+        """
+        return {"path": self.path, "line": self.line, "side": "RIGHT", "body": self.body}
+
+
+class PostedReview(GitHubModel):
+    """The result of posting a review."""
+
+    review_id: int
+    html_url: str | None = None
+    comment_count: int = 0

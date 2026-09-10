@@ -188,7 +188,7 @@ def _handle_installation(session: Session, *, event: WebhookEvent) -> IngestionR
 
     removed = 0
     for remote in payload.repositories_removed:
-        existing = RepositoryStore(session).get_by_github_id(remote.id)
+        existing = RepositoryStore(session).get_by_github_id(remote.id, owner_id=owner.id)
         if existing is not None and existing.is_active:
             existing.is_active = False
             removed += 1
@@ -240,7 +240,16 @@ def _deactivate_installation(session: Session, *, installation_id: int) -> int:
 def _handle_pull_request(session: Session, *, event: WebhookEvent) -> IngestionResult:
     payload = PullRequestEvent.model_validate(event.payload)
 
-    repository = RepositoryStore(session).get_by_github_id(payload.repository.id)
+    # Identified by installation, not owner: the delivery carries no DevPilot
+    # user, and an installation belongs to exactly one.
+    installation_id = payload.installation.id if payload.installation else None
+    repository = (
+        RepositoryStore(session).get_by_installation_and_github_id(
+            installation_id, payload.repository.id
+        )
+        if installation_id is not None
+        else None
+    )
     if repository is None:
         # A delivery for a repository DevPilot does not track. Recorded so the
         # retry is recognised, but there is nothing to review.
@@ -290,30 +299,52 @@ def _handle_pull_request(session: Session, *, event: WebhookEvent) -> IngestionR
 def _upsert_pull_request(
     session: Session, *, repository_id: Any, payload: PullRequestEvent
 ) -> PullRequest:
-    """Create or refresh the pull request row from the delivery."""
+    """Create or refresh the pull request row from the delivery.
+
+    The insert is attempted inside a SAVEPOINT and a unique violation is treated
+    as "somebody else just created it". GitHub delivers concurrently -- a push
+    and a label change arrive at the same moment -- so a plain check-then-insert
+    has a window where two requests both find nothing and both insert. That
+    surfaced as HTTP 500s under load testing, not in any unit test.
+    """
     store = PullRequestStore(session)
     existing = store.get_by_number(repository_id, payload.number)
 
-    state = _resolve_state(payload)
-
     if existing is None:
-        return store.add(
-            PullRequest(
-                repository_id=repository_id,
-                github_pr_id=payload.pull_request.id,
-                number=payload.number,
-                title=payload.pull_request.title,
-                author_login=payload.pull_request.user.login if payload.pull_request.user else "",
-                state=state,
-                head_sha=payload.pull_request.head.sha,
-                base_sha=payload.pull_request.base.sha,
-                head_ref=payload.pull_request.head.ref,
-                base_ref=payload.pull_request.base.ref,
-            )
+        candidate = PullRequest(
+            repository_id=repository_id,
+            github_pr_id=payload.pull_request.id,
+            number=payload.number,
+            title=payload.pull_request.title,
+            author_login=payload.pull_request.user.login if payload.pull_request.user else "",
+            state=_resolve_state(payload),
+            head_sha=payload.pull_request.head.sha,
+            base_sha=payload.pull_request.base.sha,
+            head_ref=payload.pull_request.head.ref,
+            base_ref=payload.pull_request.base.ref,
         )
+        try:
+            with session.begin_nested():
+                session.add(candidate)
+                session.flush()
+        except IntegrityError:
+            # Lost the race. The winner's row is the one to update.
+            logger.info(
+                "webhook.pull_request_insert_raced",
+                repository_id=str(repository_id),
+                number=payload.number,
+            )
+            existing = store.get_by_number(repository_id, payload.number)
+            if existing is None:
+                # The conflict was on `github_pr_id` rather than the number --
+                # the same pull request reached us under a different repository
+                # row. Nothing sensible to update, so re-raise.
+                raise
+        else:
+            return candidate
 
     existing.title = payload.pull_request.title
-    existing.state = state
+    existing.state = _resolve_state(payload)
     existing.head_sha = payload.pull_request.head.sha
     existing.base_sha = payload.pull_request.base.sha
     existing.head_ref = payload.pull_request.head.ref

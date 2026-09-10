@@ -29,10 +29,32 @@ class RepositoryStore:
     def get_by_id(self, repository_id: uuid.UUID) -> Repository | None:
         return self._session.get(Repository, repository_id)
 
-    def get_by_github_id(self, github_repo_id: int) -> Repository | None:
-        """Look up by GitHub's id, the only identifier that survives a rename."""
-        statement = select(Repository).where(Repository.github_repo_id == github_repo_id)
+    def get_by_github_id(self, github_repo_id: int, *, owner_id: uuid.UUID) -> Repository | None:
+        """Look up one owner's copy of a repository.
+
+        Scoped by owner because the same GitHub repository can be tracked by
+        several DevPilot users, each with their own row and review history.
+        """
+        statement = select(Repository).where(
+            Repository.github_repo_id == github_repo_id,
+            Repository.owner_id == owner_id,
+        )
         return self._session.execute(statement).scalar_one_or_none()
+
+    def get_by_installation_and_github_id(
+        self, installation_id: int, github_repo_id: int
+    ) -> Repository | None:
+        """Find the row a webhook refers to.
+
+        A delivery carries an installation, not a DevPilot user, and an
+        installation belongs to exactly one owner -- so this pair identifies a
+        single row even when several users track the same repository.
+        """
+        statement = select(Repository).where(
+            Repository.github_repo_id == github_repo_id,
+            Repository.installation_id == installation_id,
+        )
+        return self._session.execute(statement).scalars().first()
 
     def get_by_full_name(self, full_name: str) -> Repository | None:
         statement = select(Repository).where(Repository.full_name == full_name)

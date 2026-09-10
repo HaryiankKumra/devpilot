@@ -1146,3 +1146,424 @@ outside the diff. That wastes output tokens and, worse, means the model spent
 its attention on code the author did not touch.
 
 **Cost:** a few dozen words of prompt. It pays for itself in the first review.
+
+## 67. One GitHub review, not a comment per finding
+
+**Chosen:** every finding for a pull request is posted as a single review whose
+inline comments are attached in one API call.
+
+**Alternative:** `POST /issues/{n}/comments` once per finding.
+
+**Why:** GitHub sends a notification per comment. Eight findings would be eight
+emails, eight timeline entries, and eight chances to be muted. A review is one
+notification containing eight comments, which is how a human reviewer behaves. It
+is also atomic: either the whole review appears or none of it does, so a failure
+halfway through cannot leave half a review on someone's pull request.
+
+**Cost:** one large request instead of several small ones, and a single rejected
+inline position fails the entire call. Positions are therefore validated against
+the diff before the request is built.
+
+## 68. Posting is idempotent through a stored review id
+
+**Chosen:** `reviews.github_review_id` is written after a successful post, and a
+review that already has one is never posted again.
+
+**Alternative:** trust that the job runs once.
+
+**Why:** it does not. `acks_late=True` means a worker killed after posting but
+before committing will have its message redelivered, and GitHub itself redelivers
+webhooks it believes failed. Without the marker, the visible symptom is a pull
+request accumulating identical reviews -- the worst kind of bug, because it is
+loud, public, and in someone else's repository.
+
+**Cost:** a review posted but not recorded (the process dies between the two)
+will post twice. That window is one statement wide, against a redelivery window
+of minutes, so it turns a routine failure into a rare one.
+
+## 69. Confidence gates posting, not storing
+
+**Chosen:** low-confidence findings are persisted and shown on the dashboard, and
+excluded from what is posted to GitHub.
+
+**Why:** the two audiences have different costs of being wrong. On the dashboard
+a weak finding is a row a user can ignore; on a pull request it is a comment
+someone must read, evaluate and dismiss in front of their colleagues. A reviewer
+that posts its guesses stops being read at all, and once that happens the good
+findings go unread with the bad ones. Storing them anyway means the threshold can
+be tuned later against real data instead of a fresh LLM bill.
+
+**Cost:** two different views of one review, which the UI has to explain. The
+dashboard labels which findings were posted.
+
+## 70. A failed post does not fail the review
+
+**Chosen:** if publishing raises, the review stays `completed` and the failure is
+recorded on the job.
+
+**Alternative:** mark the review failed and retry the whole task.
+
+**Why:** by the time publishing runs, the expensive work is done and committed --
+the diff was fetched, the LLM was paid for, the findings are in the database.
+Retrying the task would redo all of it to fix the last and cheapest step. The
+review is genuinely complete; only its delivery failed, and the dashboard shows
+it either way.
+
+**Cost:** a review can exist that the pull request never sees. It is visible in
+the UI and in the job's error field, and re-posting is cheap.
+
+## 71. Reviews are posted as COMMENT, never REQUEST_CHANGES
+
+**Chosen:** `event: "COMMENT"` is hardcoded.
+
+**Why:** `REQUEST_CHANGES` blocks merges under many branch protection settings.
+An automated reviewer that can block a merge on a hallucinated finding will be
+uninstalled the first time it does, and it will do it. Advisory output earns its
+place; a gate has to be earned first. This is the same instinct as computing the
+risk score in code rather than letting the model choose it (entry 21).
+
+**Cost:** a genuinely critical finding does not stop the merge. The risk score and
+the dashboard make severity visible; the decision stays with a person.
+
+## 72. Repository identity is per owner, not global
+
+**Chosen:** `repositories` is unique on `(owner_id, github_repo_id)` rather than
+on `github_repo_id` alone (migration 0006).
+
+**Why:** the original constraint quietly encoded "one DevPilot account per GitHub
+repository". Two users who both have access to the same repository are completely
+ordinary, and under the global constraint the second one's sync inserted nothing
+and their dashboard was empty -- no error, no log line, just missing data. Every
+other row is already scoped to an owner; the constraint was the one place that
+was not.
+
+**Cost:** the same repository is stored once per owner, so its metadata is
+duplicated. That is the right shape for per-owner settings anyway, and the row is
+small.
+
+**How it was found:** a Playwright test that registers a *second* user. The whole
+unit suite passed, because a bug in multi-tenancy needs two tenants to appear.
+
+## 73. Pull request identity is per repository
+
+**Chosen:** `pull_requests` is unique on `(repository_id, github_pr_id)`
+(migration 0007).
+
+**Why:** the same mistake as entry 72, one table over, and it stayed invisible
+until four owners tracked one repository at once under load. The lesson is worth
+more than the fix: a globally unique external id is almost always wrong in a
+multi-tenant schema, because the id is unique in *GitHub's* namespace, not in
+ours.
+
+**Cost:** identical to entry 72.
+
+**How it was found:** a Locust run. It needs concurrency and several accounts,
+which is exactly the combination no unit test creates.
+
+## 74. Insert and catch, rather than check then insert
+
+**Chosen:** `_upsert_pull_request` attempts the insert inside a `SAVEPOINT` and,
+on `IntegrityError`, re-reads the row that won.
+
+**Alternative:** `SELECT` first, `INSERT` if absent.
+
+**Why:** check-then-act is not atomic. Two webhook deliveries for the same pull
+request arriving milliseconds apart both saw "no row", both inserted, and one got
+an unhandled `IntegrityError` -- an HTTP 500 that GitHub then redelivered. The
+unique constraint is the only authority here that is actually atomic, so the code
+asks it instead of guessing. The `SAVEPOINT` matters: without it the failed insert
+poisons the outer transaction and the recovery read cannot run.
+
+**Cost:** an exception on a normal path, which reads oddly until you know why. It
+is logged at info, not error, because a race here is expected.
+
+**How it was found:** two HTTP 500s out of roughly 600 requests in a load test.
+
+## 75. Fixed-window rate limiting, not a sliding log
+
+**Chosen:** one Redis counter per client per window, expiring with the window.
+
+**Alternative:** a sliding window log -- a sorted set of request timestamps.
+
+**Why:** the fixed window is one `INCR` and one `EXPIRE` in a single pipeline. The
+sliding log is a sorted set, a range delete, a cardinality check and a trim --
+several round trips and unbounded memory per client -- to buy precision that
+matters for metered billing and does not matter for stopping brute force. Its
+known flaw is a burst of up to twice the limit across a window boundary, which is
+an acceptable price for an order of magnitude less work per request.
+
+**Cost:** that boundary burst. If DevPilot ever bills per request, this is the
+first thing to replace.
+
+## 76. The limiter fails open
+
+**Chosen:** if Redis raises, the request is allowed and the failure is logged at
+error level.
+
+**Alternative:** fail closed -- refuse when the limiter cannot be consulted.
+
+**Why:** failing closed means a Redis blip takes the entire API down. The limiter
+exists to contain abuse, which is a bounded harm; refusing all traffic is an
+unbounded one. Choosing to fail open is choosing which outage you would rather
+have. For an authorization check the answer would be the opposite, and that
+difference is the whole point.
+
+**Cost:** an attacker who can disrupt Redis can also disable rate limiting. They
+still face authentication, and the error log makes the state visible rather than
+silent.
+
+## 77. Webhooks and health are never rate limited
+
+**Chosen:** `/api/v1/webhooks/*` and `/health` are exempt.
+
+**Why:** GitHub decides its own delivery rate and retries anything it believes
+failed, so a 429 does not reduce load -- it turns one delivery into several and
+makes the burst worse. That endpoint is already cheap and idempotent, and it is
+authenticated by HMAC signature rather than by volume. `/health` is exempt because
+an orchestrator probing every few seconds would otherwise throttle itself into
+declaring a healthy service dead, which is a rate limiter causing the outage it
+was installed to prevent.
+
+**Cost:** anyone holding the webhook secret gets an unlimited endpoint. They can
+already create jobs directly; the limiter was never the control there.
+
+## 78. Keyed on the user where there is one
+
+**Chosen:** the limit is keyed on the authenticated user id when the request
+carries a valid token, and on client IP otherwise. `X-Forwarded-For` is honoured
+only when `trust_proxy_headers` is set.
+
+**Why:** keying purely on IP punishes shared addresses -- an office or campus NAT
+means one noisy client exhausts everyone's allowance. The token is *decoded and
+verified*, not merely read, so a forged one cannot claim someone else's bucket.
+And `X-Forwarded-For` is a client-supplied string: trusting it unconditionally
+would let any caller reset their own limit by inventing an address, so it is read
+only where a proxy is known to overwrite it.
+
+**Cost:** one signature verification per request on the limiter's path, which is
+cheap, plus a flag that must be set correctly in production. Setting it wrong
+fails safe -- everyone shares the proxy's IP.
+
+## 79. Security headers in application middleware, not only in nginx
+
+**Chosen:** `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and a
+`default-src 'none'` CSP are set by FastAPI middleware.
+
+**Alternative:** set them at the reverse proxy.
+
+**Why:** the proxy is deployment-specific and the API is not. Headers set in the
+application hold when the API runs directly, in Compose, under a test client, or
+behind a proxy someone else configured -- and they are covered by tests, which a
+proxy config is not. The CSP is maximally restrictive because the API serves JSON:
+it has no scripts, styles or frames to allow, so anything the policy permits is
+pure attack surface. The frontend is a separate origin with its own policy.
+
+**Cost:** duplicated headers if the proxy also sets them, which is harmless.
+
+## 80. HSTS is off by default
+
+**Chosen:** `Strict-Transport-Security` is sent only when `enable_hsts` is set.
+
+**Why:** the header is meaningless over plain HTTP and actively harmful locally --
+a browser that receives it on `localhost` will refuse plain HTTP to `localhost`
+for the whole `max-age`, across every project on that machine, and clearing it is
+obscure. Enabling it is a decision for whoever actually terminates TLS.
+
+**Cost:** it has to be remembered at deploy time, so the deployment checklist
+lists it.
+
+## 81. End-to-end tests run against the real stack
+
+**Chosen:** Playwright drives a browser against the actual API, Postgres, Redis
+and worker in Compose. No mocked network layer.
+
+**Alternative:** mock the API in the browser and assert the UI renders.
+
+**Why:** a mocked API tests that the frontend renders what the frontend was told
+to expect, which is a tautology whenever the contract has drifted. Every bug these
+tests actually caught -- the per-owner repository constraint most of all -- lived
+in the seam between layers, and a mock is precisely a decision to stop testing
+that seam. The API runs in mock GitHub and mock LLM mode, so the test is free and
+deterministic while still being a real HTTP call to real code.
+
+**Cost:** slower, and it needs the stack up. It is a separate CI job for that
+reason, gated behind the unit jobs so a type error fails in seconds rather than
+after a browser download.
+
+## 82. A 429 in the load test counts as a success
+
+**Chosen:** the Locust profiles mark rate-limited responses `success()`.
+
+**Why:** the limiter refusing a request is the system working. Counting those as
+failures produces a run whose failure rate measures how hard you pushed rather
+than whether anything is broken -- and it buries the two real HTTP 500s from entry
+74 under hundreds of expected 429s. Registration in `on_start` retries with
+backoff for the same reason: a throttled sign-up leaves a virtual user with no
+token, so every later request returns 401 and the run reports a wall of failures
+that say nothing about read capacity.
+
+**Cost:** the profiles are more code than a naive script. To measure raw capacity
+instead, the run sets `DEVPILOT_RATE_LIMIT_ENABLED=false`.
+
+## 83. Rate limiting is disabled in the test suite
+
+**Chosen:** the `settings` fixture sets `rate_limit_enabled=False`; the limiter's
+own tests enable it explicitly against an in-memory fake.
+
+**Why:** tests share one Redis, so they share a window, and the four-hundredth
+test to make an HTTP call fails for reasons that have nothing to do with it -- a
+failure that moves when tests are reordered, which is the worst kind to debug. The
+behaviour is not untested; it is tested in one place where the counter is
+deterministic and inspectable.
+
+**Cost:** the middleware runs disabled in most tests, so an interaction between it
+and something else would not be caught there. The Compose stack runs it enabled,
+and the load tests exercise it under real concurrency.
+
+## 84. A separate production Compose file, not an override
+
+**Chosen:** `docker-compose.prod.yml` is a complete, standalone file.
+
+**Alternative:** the idiomatic `-f docker-compose.yml -f docker-compose.prod.yml`
+override pair.
+
+**Why:** an override can add keys and replace them, but it cannot *remove* them.
+The two things production must not have are the source bind mounts and
+`--reload`, and both would survive the merge -- so the file whose entire purpose
+is to exclude them would fail at exactly that. There is a second reason: reading
+one file top to bottom tells you what runs in production. Reading a merged pair
+means simulating Compose's merge rules in your head, and the cost of getting that
+wrong is a production container running whatever is on the deploy host's disk.
+
+**Cost:** the two files share structure, so a change to the database image has to
+be made twice, and they can drift. Mitigated by YAML anchors *within* the
+production file, which is where the dangerous duplication actually was -- the API,
+worker and migration job now cannot disagree about which database they use.
+
+## 85. Migrations as a one-shot job, not on API startup
+
+**Chosen:** a `migrate` service runs `alembic upgrade head` and must exit 0 before
+`api` and `worker` start.
+
+**Alternative:** run migrations in the API's startup hook.
+
+**Why:** the startup hook is fine with one process and wrong with four. Each
+uvicorn worker would run the upgrade against the same database simultaneously;
+Alembic takes a lock, so three of them block until the first finishes, and a
+migration slower than the startup timeout turns into a failed deploy that looks
+like a crash loop. A one-shot job runs exactly once, and failing it fails the
+deploy *loudly* -- which is the right outcome, because serving traffic against a
+schema the code does not expect is worse than serving no traffic.
+
+**Cost:** one more service in the file, and a deploy has an explicit ordering
+step. `condition: service_completed_successfully` expresses it in Compose rather
+than in a shell script.
+
+## 86. Four uvicorn workers in one container, not four containers
+
+**Chosen:** `--workers 4` inside the `api` service.
+
+**Alternative:** four single-worker containers behind a load balancer.
+
+**Why:** at one host, uvicorn's own process manager already provides what the
+extra containers would -- parallelism past the GIL, and a supervisor that
+restarts a dead worker. Four containers would need a load balancer purely to
+distribute across them, which is infrastructure bought before the problem. The
+constraint worth knowing is that each worker opens its own connection pool, so
+`workers x DB_POOL_SIZE` must stay under Postgres `max_connections`; at the
+shipped values that is 20 of 100.
+
+**Cost:** the container is one restart unit, so a deploy cycles all four workers
+together. Separate containers would allow rolling replacement, which is the right
+move once a deploy outage stops being acceptable.
+
+## 87. CI runs the migrations against a real PostgreSQL
+
+**Chosen:** the backend job starts a `pgvector/pgvector:pg16` service and runs
+`alembic upgrade head` before the tests.
+
+**Alternative:** create the schema from `Base.metadata.create_all()`, which is
+faster and needs no service.
+
+**Why:** `create_all` tests the models, not the migrations, and the migrations are
+what production actually runs. CI is the only place they execute before a deploy
+does -- so a migration that is valid Python and invalid SQL would otherwise be
+discovered by the deploy. Using the pgvector image rather than stock Postgres
+matters for the same reason: on stock Postgres every retrieval test skips, and a
+skipped test is not a passing one.
+
+**Cost:** a slower job, and a service container to wait on. The offline
+`--sql` drift test in `test_migrations.py` still runs everywhere with no
+database, so the fast feedback did not go away.
+
+## 88. Production images are built in CI but not pushed
+
+**Chosen:** the `images` job builds `backend/Dockerfile` and
+`frontend/Dockerfile` on every run and pushes nowhere.
+
+**Why:** the Compose development stack builds a *different* target -- the frontend
+runs Vite, not nginx -- so nothing else in CI proves the production images still
+build. That failure is worth catching on a pull request rather than at deploy
+time. Pushing is a separate decision requiring a registry and credentials, and
+this project deploys by building on the host.
+
+**Cost:** roughly a minute per run, largely eliminated by the GitHub Actions
+build cache. **Revisit when:** there is a registry to push to, at which point this
+job grows a tag and a login.
+
+## 89. Nothing binds to a public interface
+
+**Chosen:** in production, Postgres and Redis publish no host ports at all, and
+`api` and `frontend` bind to `127.0.0.1`.
+
+**Why:** a published port is reachable from the internet the moment the host
+firewall is wrong, and host firewalls are wrong more often than anyone admits --
+Docker's own iptables rules have historically bypassed `ufw`. Binding to loopback
+means the reverse proxy on the same host can reach the service and nothing else
+can, which does not depend on a firewall being right. TLS terminates at that
+proxy: certificate renewal, HTTP/2 and redirects are its job, and reimplementing
+them in uvicorn would be worse at all three.
+
+**Cost:** you cannot attach `psql` from your laptop without an SSH tunnel. That is
+the intended difficulty.
+
+## 90. Every container caps its logs
+
+**Chosen:** `max-size: 10m`, `max-file: 5` on all six services.
+
+**Why:** the default `json-file` driver is unbounded. One chatty container fills
+the host disk, and then *every* service fails -- Postgres first, and in a way that
+looks like a database bug rather than a disk problem. Two lines of configuration
+convert a total outage into a rotated log.
+
+**Cost:** 50 MB per service on disk, and old logs are gone. Anything that must
+outlive rotation should be shipped off the host anyway.
+
+## 91. Workers recycle after 100 tasks
+
+**Chosen:** `--max-tasks-per-child=100`.
+
+**Why:** a long-lived Python process that leaks even slightly per review will
+eventually reach the container memory limit and be OOM-killed mid-task, at an
+unpredictable moment, taking a review with it. Recycling makes that same reclaim
+happen predictably, *between* tasks, where it costs nothing. It is insurance
+against a leak rather than a claim that one exists.
+
+**Cost:** a process start every 100 tasks -- a fraction of a second against
+reviews that take tens.
+
+## 92. Redis refuses writes rather than evicting
+
+**Chosen:** `--maxmemory-policy noeviction` with an explicit `maxmemory`.
+
+**Why:** the default (`noeviction` for a bare server, but `allkeys-lru` in many
+images and hosted configurations) would let Redis silently discard queued Celery
+messages under memory pressure. A dropped job is a review that never happens and
+never errors, which is the hardest possible failure to notice. Refusing the write
+surfaces the problem at enqueue time, where it is visible and retryable. The
+`maxmemory` bound exists so this is a Redis error rather than the kernel killing
+the container.
+
+**Cost:** a full Redis rejects new jobs instead of quietly shedding old ones. That
+is the correct trade for a queue and the wrong one for a cache, which is why the
+rate-limit counters -- the only cache-like data here -- expire on their own.

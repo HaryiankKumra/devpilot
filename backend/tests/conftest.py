@@ -59,6 +59,11 @@ def settings() -> Settings:
         environment=Environment.CI,
         debug=False,
         cors_origins=["http://localhost:5173"],
+        # Off for the suite at large. Left on, every test would share one Redis
+        # window and throttle the ones that ran after it -- and the tests would
+        # depend on Redis being up. `tests/test_rate_limit.py` enables it
+        # explicitly against a fake.
+        rate_limit_enabled=False,
     )
 
 

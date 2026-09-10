@@ -27,13 +27,22 @@ class PullRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # is the pair. This is also what makes webhook handling idempotent at
         # the row level: a re-delivery updates rather than duplicates.
         UniqueConstraint("repository_id", "number", name="uq_pull_requests_repository_id_number"),
+        # GitHub's pull request id is globally unique *on GitHub*, but DevPilot
+        # stores one repository row per owner -- so two users tracking the same
+        # repository legitimately hold the same pull request twice. Scoping this
+        # to the repository is the same correction made to `repositories`.
+        UniqueConstraint(
+            "repository_id",
+            "github_pr_id",
+            name="uq_pull_requests_repository_id_github_pr_id",
+        ),
     )
 
     repository_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("repositories.id", ondelete="CASCADE"), index=True, nullable=False
     )
 
-    github_pr_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    github_pr_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # The number shown in the UI and used in API paths (`/pulls/42`).
     number: Mapped[int] = mapped_column(Integer, nullable=False)
 

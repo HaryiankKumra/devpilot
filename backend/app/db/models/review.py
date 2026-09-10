@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -53,6 +53,10 @@ class Review(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # The GitHub review this was posted as, or NULL if it was never posted
+    # (posting disabled, nothing confident enough, or GitHub refused it).
+    github_review_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     review_job: Mapped[ReviewJob] = relationship(back_populates="review")
     pull_request: Mapped[PullRequest] = relationship(back_populates="reviews")

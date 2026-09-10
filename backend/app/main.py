@@ -14,6 +14,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.errors import register_integration_exception_handlers
+from app.api.middleware_rate_limit import RateLimitMiddleware
+from app.api.middleware_security import SecurityHeadersMiddleware
 from app.api.router import api_router
 from app.api.v1 import health
 from app.core.config import Settings, get_settings
@@ -55,6 +57,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
 
+    # Starlette applies middleware bottom-up, so the last added runs first.
+    # Rate limiting must run before anything expensive, and the request-id
+    # context must be bound before rate limiting so a 429 is still traceable.
+    app.add_middleware(SecurityHeadersMiddleware, settings=settings)
+    app.add_middleware(RateLimitMiddleware, settings=settings)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,

@@ -37,6 +37,8 @@ from app.integrations.github.models import (
     GitHubOAuthToken,
     GitHubPullRequest,
     GitHubRepository,
+    PostedReview,
+    ReviewComment,
 )
 
 logger = get_logger(__name__)
@@ -78,6 +80,17 @@ class GitHubClient(Protocol):
     def list_repository_files(
         self, installation_id: int, full_name: str, ref: str
     ) -> list[str]: ...
+
+    def create_pull_request_review(
+        self,
+        installation_id: int,
+        full_name: str,
+        number: int,
+        *,
+        commit_sha: str,
+        body: str,
+        comments: list[ReviewComment],
+    ) -> PostedReview: ...
 
     def exchange_oauth_code(self, code: str) -> GitHubOAuthToken: ...
 
@@ -360,6 +373,50 @@ class RestGitHubClient:
 
         tree = payload.get("tree", [])
         return [item["path"] for item in tree if item.get("type") == "blob" and "path" in item]
+
+    def create_pull_request_review(
+        self,
+        installation_id: int,
+        full_name: str,
+        number: int,
+        *,
+        commit_sha: str,
+        body: str,
+        comments: list[ReviewComment],
+    ) -> PostedReview:
+        """Post one review carrying every inline comment.
+
+        A single review rather than N standalone comments, for two reasons. It
+        sends the author one notification instead of a dozen, and GitHub groups
+        the comments under a single collapsible entry rather than scattering
+        them through the timeline. The difference between a tool people keep
+        installed and one they mute is largely this.
+
+        `commit_sha` pins the review to the exact commit reviewed. Without it
+        GitHub attaches comments to the branch head, which may already have
+        moved -- putting the comment on a line the author has since rewritten.
+        """
+        payload: dict[str, Any] = {
+            "commit_id": commit_sha,
+            "body": body,
+            # COMMENT rather than REQUEST_CHANGES: blocking a merge is a
+            # decision for a human, not for an automated first pass.
+            "event": "COMMENT",
+            "comments": [comment.to_payload() for comment in comments],
+        }
+
+        response = self._request(
+            "POST",
+            f"/repos/{full_name}/pulls/{number}/reviews",
+            token=self._installation_token(installation_id),
+            json_body=payload,
+        )
+        data = response.json()
+        return PostedReview(
+            review_id=int(data["id"]),
+            html_url=data.get("html_url"),
+            comment_count=len(comments),
+        )
 
     # --- OAuth (user identity, not installation access) ----------------------
 

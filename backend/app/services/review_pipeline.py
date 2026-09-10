@@ -13,8 +13,8 @@ a time. What runs today:
   the surviving findings, and store the review.
 * **Retrieval** (Milestone 8) -- find related code in the repository index by
   vector similarity, so the model can see what the diff calls into.
-* **Post to GitHub** (Milestone 9) -- not built. Findings are stored and shown
-  on the dashboard, but nothing is written back to the pull request.
+* **Post to GitHub** (Milestone 9) -- comment the high-confidence findings on
+  the pull request as a single review.
 
 `gather_context` is deliberately separate from `execute_review` so the finished
 stages can be called, tested and inspected without the unfinished ones.
@@ -40,6 +40,7 @@ from app.integrations.llm.factory import build_llm_provider
 from app.integrations.llm.provider import LLMProvider
 from app.services import llm_review as llm_review_service
 from app.services.diff import FileDiff, ParsedDiff, parse_unified_diff
+from app.services.publishing import publish_review
 from app.services.retrieval import RetrievedChunk, retrieve_context
 from app.services.risk import calculate_risk_score
 from app.services.static_analysis import StaticFinding, analyze_file_detailed
@@ -81,6 +82,10 @@ class ReviewOutcome:
     finding_count: int
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    # Findings actually commented on the pull request. Fewer than
+    # `finding_count`: low-confidence and file-level findings stay on the
+    # dashboard only.
+    posted_comment_count: int = 0
 
 
 @dataclass
@@ -370,8 +375,10 @@ def execute_review(
     files, ask the model, discard every finding the diff does not support,
     compute the risk score in Python, and persist the result.
 
-    Posting the surviving findings to GitHub is Milestone 9; they are stored and
-    visible on the dashboard until then.
+    Posting is the last stage and is deliberately allowed to fail without
+    failing the review: the result is already stored, and losing it because a
+    comment could not be delivered would trade the valuable thing for the
+    cosmetic one.
     """
     settings = settings or get_settings()
     provider = provider or build_llm_provider(settings)
@@ -407,6 +414,15 @@ def execute_review(
         risk_score=risk_score,
     )
 
+    published = publish_review(
+        session,
+        review=review,
+        pull_request=pull_request,
+        repository=repository,
+        client=client,
+        settings=settings,
+    )
+
     logger.info(
         "pipeline.review_completed",
         review_job_id=str(job.id),
@@ -419,6 +435,8 @@ def execute_review(
         model=validated.model_name,
         static_analysis_complete=context.static_analysis_complete,
         retrieved_chunks=len(context.retrieved_chunks),
+        posted_comments=published.comment_count,
+        posted=published.posted,
     )
 
     return ReviewOutcome(
@@ -428,4 +446,5 @@ def execute_review(
         finding_count=len(validated.findings),
         prompt_tokens=validated.prompt_tokens,
         completion_tokens=validated.completion_tokens,
+        posted_comment_count=published.comment_count,
     )

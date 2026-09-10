@@ -143,6 +143,51 @@ def migration_dropped_columns(migration_sql: str) -> dict[str, set[str]]:
     return dropped
 
 
+@pytest.fixture(scope="module")
+def migration_constraint_changes(migration_sql: str) -> dict[str, tuple[set[str], set[str]]]:
+    """Constraints added and dropped by `ALTER TABLE`, per table.
+
+    Same gap as columns had: a constraint introduced or removed by a later
+    migration is invisible if only CREATE TABLE is read, so a changed
+    constraint would look like drift that was never reconciled.
+    """
+    added: dict[str, set[str]] = {}
+    dropped: dict[str, set[str]] = {}
+
+    for match in re.finditer(r"ALTER TABLE (\w+) ADD (CONSTRAINT .+?);", migration_sql):
+        definition = re.sub(r"\s+", " ", match.group(2)).strip()
+        added.setdefault(match.group(1), set()).add(definition)
+
+    for match in re.finditer(r"ALTER TABLE (\w+) DROP CONSTRAINT (\w+)", migration_sql):
+        dropped.setdefault(match.group(1), set()).add(match.group(2))
+
+    return {
+        table: (added.get(table, set()), dropped.get(table, set()))
+        for table in set(added) | set(dropped)
+    }
+
+
+def _constraint_name(definition: str) -> str:
+    """The name from `CONSTRAINT uq_x UNIQUE (a, b)`."""
+    parts = definition.split(" ", 2)
+    return parts[1] if len(parts) > 1 else definition
+
+
+def _migrated_constraints(
+    table_name: str,
+    migration_tables: dict[str, str],
+    changes: dict[str, tuple[set[str], set[str]]],
+) -> set[str]:
+    """Every constraint the migrations leave on `table_name`."""
+    _, created = _columns_and_constraints(migration_tables[table_name])
+    added, dropped = changes.get(table_name, (set(), set()))
+
+    surviving = {
+        definition for definition in created if _constraint_name(definition) not in dropped
+    }
+    return surviving | added
+
+
 def _column_name(definition: str) -> str:
     """The name from a column definition such as `embedding VECTOR(1024) NOT NULL`."""
     return definition.split(" ", 1)[0].strip('"')
@@ -202,12 +247,18 @@ class TestMigrationsMatchModels:
 
     @pytest.mark.parametrize("table_name", sorted(Base.metadata.tables))
     def test_table_constraints_match(
-        self, table_name: str, migration_tables: dict[str, str]
+        self,
+        table_name: str,
+        migration_tables: dict[str, str],
+        migration_constraint_changes: dict[str, tuple[set[str], set[str]]],
     ) -> None:
         _, expected = _columns_and_constraints(_model_ddl(table_name))
-        _, actual = _columns_and_constraints(migration_tables[table_name])
+        actual = _migrated_constraints(table_name, migration_tables, migration_constraint_changes)
 
-        assert actual == expected
+        assert actual == expected, (
+            f"constraints only in the models: {sorted(expected - actual)}; "
+            f"only in the migrations: {sorted(actual - expected)}"
+        )
 
 
 class TestMigrationContent:

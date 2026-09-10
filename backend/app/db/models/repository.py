@@ -22,9 +22,13 @@ class Repository(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "repositories"
     __table_args__ = (
-        # GitHub's own id is the identity that survives renames, so it -- not
-        # `full_name` -- is what must be unique.
-        UniqueConstraint("github_repo_id", name="uq_repositories_github_repo_id"),
+        # Unique *per owner*, not globally. GitHub's numeric id is the identity
+        # that survives renames, but DevPilot is multi-tenant: two users may
+        # each connect the same repository, and a global constraint silently
+        # gave the second one an empty list with no explanation.
+        UniqueConstraint(
+            "owner_id", "github_repo_id", name="uq_repositories_owner_id_github_repo_id"
+        ),
     )
 
     owner_id: Mapped[uuid.UUID] = mapped_column(

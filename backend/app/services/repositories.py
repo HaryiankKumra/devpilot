@@ -51,7 +51,7 @@ def upsert_repository(
     Returns the row and whether it was newly created.
     """
     store = RepositoryStore(session)
-    existing = store.get_by_github_id(remote.id)
+    existing = store.get_by_github_id(remote.id, owner_id=owner.id)
 
     if existing is None:
         created = store.add(

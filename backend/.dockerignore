@@ -9,3 +9,7 @@ __pycache__/
 htmlcov/
 tests/
 .env
+
+# Docker does not exclude this by default, and the history is both large
+# and irrelevant to the running image.
+.git

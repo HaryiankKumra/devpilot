@@ -2,3 +2,11 @@ node_modules/
 dist/
 .env
 *.log
+
+# Test scaffolding: not part of the served bundle, and its churn
+# would invalidate the npm layer cache on every run.
+e2e/
+playwright-report/
+test-results/
+playwright.config.ts
+.git

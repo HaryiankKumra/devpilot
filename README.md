@@ -8,11 +8,12 @@ relevant repository context with semantic search, ask an LLM for a strictly
 validated structured review, score the risk deterministically, and post the
 high-confidence findings back to the pull request.
 
-> **Status: Milestone 7 of 12 complete.** The review pipeline now runs end to
-> end: a pull request is recorded, queued, and picked up by a worker that
-> fetches the diff, runs static analysis, asks a language model for a structured
-> review, discards every finding the diff does not support, computes a risk
-> score in Python, and stores the result.
+> **Status: complete — all 12 milestones.** The pipeline runs end to end: a
+> webhook is verified and recorded, a worker claims the job, fetches the diff,
+> runs static analysis, retrieves related code from pgvector, asks a language
+> model for a structured review, discards every finding the diff does not
+> support, scores the risk in Python, stores everything, and posts the
+> high-confidence findings back to the pull request as a single review.
 >
 > **It runs with no credentials at all.** `DEVPILOT_GITHUB_MODE=mock` and
 > `DEVPILOT_LLM_MODE=mock` are the defaults, so the whole thing works out of the
@@ -22,18 +23,12 @@ high-confidence findings back to the pull request.
 > [`docs/llm-setup.md`](docs/llm-setup.md) and
 > [`docs/github-app-setup.md`](docs/github-app-setup.md).
 >
-> Reviews are repository-aware: source is chunked, embedded and stored in
-> pgvector, and each review retrieves the existing code its diff refers to.
->
-> Still to come: posting findings back to GitHub (Milestone 9) and the
-> dashboard (Milestone 10).
-> Pages that are routed but not built say so explicitly rather than showing
-> placeholder data.
->
-> **It runs with no GitHub credentials.** `DEVPILOT_GITHUB_MODE=mock` (the
-> default) serves the GitHub API from an in-process fake, so the whole
-> application works out of the box. See
-> [`docs/github-app-setup.md`](docs/github-app-setup.md) to connect real GitHub.
+> **Verified, not assumed:** 477 backend tests, 10 Playwright tests driving a
+> browser against the real Docker stack, `ruff` and `mypy --strict` clean across
+> 115 source files, and a Locust run of 644 requests with **0 failures**
+> (P50 15 ms, P95 240 ms, P99 350 ms). Production configuration, CI and
+> deployment docs are in place — see
+> [`docs/deployment.md`](docs/deployment.md).
 
 ---
 
@@ -48,6 +43,8 @@ high-confidence findings back to the pull request.
 - [API](#api)
 - [Database](#database)
 - [Testing and quality gates](#testing-and-quality-gates)
+- [Continuous integration](#continuous-integration)
+- [Production deployment](#production-deployment)
 - [Project layout](#project-layout)
 - [Roadmap](#roadmap)
 - [Documentation](#documentation)
@@ -203,8 +200,12 @@ the codebase reads `os.environ` directly, and no secret has a real default.
 
 ## API
 
-Interactive documentation is served at `/docs` outside production. Current
-endpoints:
+Interactive documentation is served at `/docs` outside production — it is
+generated from the same Pydantic models the code validates against, so it cannot
+drift. [`docs/api.md`](docs/api.md) explains what a schema cannot: why each
+endpoint is shaped the way it is and what each status code means.
+
+All twenty endpoints:
 
 | Method | Path                    | Purpose                              |
 | ------ | ----------------------- | ------------------------------------ |
@@ -223,6 +224,10 @@ endpoints:
 | POST   | `/api/v1/repositories/{id}/index` | Index for semantic search  |
 | GET    | `/api/v1/repositories/{id}` | One repository                   |
 | GET    | `/api/v1/repositories/{id}/pull-requests` | Its pull requests  |
+| GET    | `/api/v1/reviews`       | Recent reviews (the dashboard feed)  |
+| GET    | `/api/v1/reviews/{id}`  | One review with its findings         |
+| GET    | `/api/v1/pull-requests/{id}` | Its jobs and results, failures included |
+| GET    | `/api/v1/findings`      | Findings across every review         |
 | POST   | `/api/v1/webhooks/github` | Receive a GitHub delivery          |
 
 Errors always use one envelope, so clients parse a single shape:
@@ -236,9 +241,10 @@ Authenticated requests carry `Authorization: Bearer <token>`.
 ## Database
 
 Eight tables: `users`, `repositories`, `pull_requests`, `webhook_events`,
-`review_jobs`, `reviews`, `findings`, `code_chunks`. The schema and the
-reasoning behind it are described in
-[`docs/architecture.md`](docs/architecture.md#data-model).
+`review_jobs`, `reviews`, `findings`, `code_chunks`. Every column, constraint and
+index — and why each one is there — is in
+[`docs/database-schema.md`](docs/database-schema.md); the boundaries they sit
+inside are in [`docs/architecture.md`](docs/architecture.md#data-model).
 
 Schema changes are applied only through Alembic; the application never creates
 tables at startup.
@@ -296,6 +302,82 @@ cleanly when it is not running:
 ../.venv/Scripts/python -m pytest -m "not integration"   # no services needed
 ```
 
+### End-to-end tests
+
+Playwright drives a real browser against the running Compose stack — no mocked
+network layer. A mocked API only proves the frontend renders what the frontend
+expected; every bug these actually caught lived in the seam between the layers.
+
+```bash
+docker compose up -d
+cd frontend && npx playwright install chromium && npm run test:e2e
+```
+
+### Load tests
+
+Three traffic profiles — dashboard reads, GitHub webhook deliveries, and logins
+— weighted the way real traffic is shaped. A 429 counts as a **success**, because
+the rate limiter refusing a request is the system working; counting those as
+failures would measure how hard you pushed rather than whether anything broke.
+
+```bash
+pip install locust
+locust -f load/locustfile.py --host http://localhost:8000 \
+    --users 50 --spawn-rate 5 --run-time 2m --headless --html load/report.html
+```
+
+Last measured run, 50 concurrent users against the local Compose stack:
+
+| Metric | Value |
+| ------ | ----- |
+| Requests | 644 |
+| Failures | **0** |
+| P50 latency | 15 ms |
+| P95 latency | 240 ms |
+| P99 latency | 350 ms |
+
+The first run of this was not clean: it surfaced two HTTP 500s from a
+check-then-insert race on `pull_requests`, and a globally unique constraint that
+broke as soon as four accounts tracked one repository. Both are fixed
+(migrations `0006`/`0007`); both were invisible to a passing unit suite, because
+they need concurrency and more than one tenant to appear.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`main` and every pull request, in four jobs:
+
+| Job | What it does |
+| --- | ------------ |
+| **Backend** | ruff, ruff format, `mypy --strict`, then `alembic upgrade head` and the full pytest suite against real Postgres (pgvector) and Redis services |
+| **Frontend** | `npm ci`, lint, format check, production build |
+| **End to end** | Boots the Compose stack, waits for `/health`, runs Playwright; uploads the report and service logs on failure |
+| **Docker images** | Builds the production API and frontend images — the dev Compose images use a different target, so nothing else proves these still build |
+
+Migrations run against a real database rather than being applied from model
+metadata: CI is the only place they execute before a deploy does.
+
+Unit jobs gate the slower ones — a type error should fail in seconds, not after a
+browser download.
+
+## Production deployment
+
+```bash
+cp .env.example .env.prod          # then fill it in properly
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+[`docker-compose.prod.yml`](docker-compose.prod.yml) is a separate file, not an
+override on the dev one: an override can add and replace keys but never remove
+them, so the development bind mounts and `--reload` would survive into
+production. No source mounts, no reloader, no host ports on Postgres or Redis,
+memory and CPU limits on everything, and migrations as a one-shot job that must
+exit 0 before the API starts.
+
+The application **refuses to boot in production** while `DEVPILOT_SECRET_KEY` is
+still the development placeholder. Full walkthrough and pre-deploy checklist:
+[`docs/deployment.md`](docs/deployment.md).
+
 ## Project layout
 
 ```
@@ -314,7 +396,10 @@ frontend/
     lib/          API client, query client, env validation
     pages/        one component per route
     routes/       route table
-docs/             architecture, tradeoffs, operations
+  e2e/            Playwright specs, run against the real stack
+load/             Locust profiles
+docs/             architecture, tradeoffs, API, schema, deployment
+.github/workflows/ CI pipeline
 ```
 
 The dependency rule is one-directional: `api` may import `services`, `services`
@@ -333,15 +418,18 @@ what keeps business logic testable without HTTP.
 | 6   | PR diff retrieval and static analysis                | Done   |
 | 7   | LLM integration with structured output validation    | Done   |
 | 8   | Repository indexing and pgvector RAG                 | Done   |
-| 9   | Full review pipeline and GitHub comments             | Next   |
-| 10  | React dashboard and review visualisation             |        |
-| 11  | Testing, security hardening, rate limiting, retries  |        |
-| 12  | Production Docker, CI/CD, deployment, documentation  |        |
+| 9   | Full review pipeline and GitHub comments             | Done   |
+| 10  | React dashboard and review visualisation             | Done   |
+| 11  | Testing, security hardening, rate limiting, retries  | Done   |
+| 12  | Production Docker, CI/CD, deployment, documentation  | Done   |
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — components and boundaries
-- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — decisions and alternatives
+- [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — 92 decisions, their alternatives, and what each one costs
+- [`docs/api.md`](docs/api.md) — endpoint reference and why each one is shaped that way
+- [`docs/database-schema.md`](docs/database-schema.md) — the eight tables, their constraints, and the reasoning
+- [`docs/deployment.md`](docs/deployment.md) — running it in production, and the checklist before you do
 - [`docs/github-app-setup.md`](docs/github-app-setup.md) — connecting a real GitHub App
 - [`docs/llm-setup.md`](docs/llm-setup.md) — connecting a real language model, and what it costs
 

@@ -19,6 +19,7 @@ reproducible.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from app.core.logging import get_logger
 from app.integrations.github.exceptions import GitHubNotFoundError
@@ -29,6 +30,8 @@ from app.integrations.github.models import (
     GitHubPullRequest,
     GitHubPullRequestRef,
     GitHubRepository,
+    PostedReview,
+    ReviewComment,
 )
 
 logger = get_logger(__name__)
@@ -83,6 +86,9 @@ class MockGitHubClient:
     """Serves canned data with the same shape as the real client."""
 
     def __init__(self) -> None:
+        # Reviews that would have been posted, in order. Nothing leaves the
+        # process.
+        self.posted_reviews: list[dict[str, Any]] = []
         logger.info("github.mock_mode_enabled")
 
     def list_installations(self) -> list[GitHubInstallation]:
@@ -130,6 +136,43 @@ class MockGitHubClient:
 
     def list_repository_files(self, installation_id: int, full_name: str, ref: str) -> list[str]:
         return sorted(MOCK_FILE_CONTENTS)
+
+    def create_pull_request_review(
+        self,
+        installation_id: int,
+        full_name: str,
+        number: int,
+        *,
+        commit_sha: str,
+        body: str,
+        comments: list[ReviewComment],
+    ) -> PostedReview:
+        """Record the review instead of posting it.
+
+        Kept on the instance so a test -- or a developer poking at the running
+        app -- can see exactly what would have reached GitHub, including the
+        rendered comment bodies.
+        """
+        self.posted_reviews.append(
+            {
+                "full_name": full_name,
+                "number": number,
+                "commit_sha": commit_sha,
+                "body": body,
+                "comments": [comment.to_payload() for comment in comments],
+            }
+        )
+        logger.info(
+            "github.mock_review_not_posted",
+            full_name=full_name,
+            number=number,
+            comments=len(comments),
+        )
+        return PostedReview(
+            review_id=900_000_000 + len(self.posted_reviews),
+            html_url=f"https://github.com/{full_name}/pull/{number}#pullrequestreview-mock",
+            comment_count=len(comments),
+        )
 
     def exchange_oauth_code(self, code: str) -> GitHubOAuthToken:
         return GitHubOAuthToken(
