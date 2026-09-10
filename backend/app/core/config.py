@@ -10,9 +10,17 @@ from __future__ import annotations
 
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated
 
-from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator, model_validator
+from pydantic import (
+    Field,
+    PostgresDsn,
+    RedisDsn,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Obvious, greppable placeholder. Production refuses to start with this value.
@@ -20,6 +28,18 @@ DEVELOPMENT_SECRET_KEY = "insecure-development-secret-key-do-not-use-in-producti
 
 # Below this length an HS256 key is brute-forceable offline from a single token.
 MINIMUM_SECRET_KEY_LENGTH = 32
+
+
+class GitHubMode(StrEnum):
+    """How DevPilot talks to GitHub.
+
+    `mock` serves canned responses from an in-process fake, so the whole
+    application can be run and tested without registering a GitHub App or
+    holding any credential. `live` talks to the real API.
+    """
+
+    LIVE = "live"
+    MOCK = "mock"
 
 
 class Environment(StrEnum):
@@ -87,6 +107,59 @@ class Settings(BaseSettings):
     # interrupt a working session. Access tokens cannot be revoked before they
     # expire; see docs/engineering-tradeoffs.md.
     access_token_expire_minutes: int = Field(default=60, ge=1)
+
+    # --- GitHub integration --------------------------------------------------
+    # `mock` needs no credentials at all; see docs/github-app-setup.md for what
+    # `live` requires and how to obtain it.
+    github_mode: GitHubMode = GitHubMode.MOCK
+
+    # From the GitHub App's settings page.
+    github_app_id: str | None = None
+    github_app_slug: str | None = Field(
+        default=None, description="URL name of the app, used to build install links."
+    )
+
+    # The App's RSA private key, used to sign the short-lived JWT that is
+    # exchanged for an installation token. Supply the PEM inline, or point at a
+    # file -- a path is usually easier to manage as a mounted secret.
+    github_app_private_key: SecretStr | None = None
+    github_app_private_key_path: Path | None = None
+
+    # Verifies the HMAC on incoming webhooks. Without it every webhook is
+    # rejected, which is the correct default: an unverified webhook is
+    # unauthenticated input that can create work and post comments.
+    github_webhook_secret: SecretStr | None = None
+
+    # OAuth credentials, used to link a DevPilot account to a GitHub identity.
+    github_client_id: str | None = None
+    github_client_secret: SecretStr | None = None
+    # Where GitHub sends the user back after they authorise. Must exactly match
+    # the callback URL registered on the app.
+    github_oauth_redirect_uri: str = "http://localhost:8000/api/v1/github/callback"
+    # Where the browser lands once linking finishes.
+    frontend_base_url: str = "http://localhost:5173"
+
+    github_api_url: str = "https://api.github.com"
+    github_web_url: str = "https://github.com"
+    github_request_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @property
+    def github_is_mocked(self) -> bool:
+        return self.github_mode is GitHubMode.MOCK
+
+    def resolve_github_private_key(self) -> str | None:
+        """Return the App private key PEM, from whichever source is configured.
+
+        The inline value wins so an environment variable can override a file
+        baked into an image.
+        """
+        if self.github_app_private_key is not None:
+            # Escaped newlines are near-unavoidable when a PEM travels through
+            # a `.env` file or a CI secret, so accept both spellings.
+            return self.github_app_private_key.get_secret_value().replace("\\n", "\n")
+        if self.github_app_private_key_path is not None:
+            return self.github_app_private_key_path.read_text(encoding="utf-8")
+        return None
 
     # --- HTTP ----------------------------------------------------------------
     # `NoDecode` suppresses pydantic-settings' default JSON decoding for complex

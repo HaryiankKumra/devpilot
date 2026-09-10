@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.errors import register_integration_exception_handlers
 from app.api.router import api_router
 from app.api.v1 import health
 from app.core.config import Settings, get_settings
@@ -65,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     register_exception_handlers(app)
+    register_integration_exception_handlers(app)
 
     app.include_router(health.router)
     app.include_router(api_router, prefix=settings.api_v1_prefix)

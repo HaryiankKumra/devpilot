@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import BigInteger, Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -17,11 +17,7 @@ EMAIL_MAX_LENGTH = 320
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A person with a DevPilot account.
-
-    GitHub linkage (installation and OAuth identity) arrives in Milestone 3 and
-    is deliberately absent here rather than being stubbed with unused columns.
-    """
+    """A person with a DevPilot account, optionally linked to a GitHub identity."""
 
     __tablename__ = "users"
 
@@ -41,6 +37,22 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Lets an account be disabled without deleting it, which would cascade to
     # the review history that other users may still need to read.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # --- Linked GitHub identity ---------------------------------------------
+    # Populated by the OAuth flow. Nullable because an account exists before it
+    # is linked, and unlinking must be possible without deleting the account.
+    #
+    # `github_id` is unique so one GitHub identity cannot be attached to two
+    # DevPilot accounts, which would make repository ownership ambiguous. It is
+    # the stable key: `github_login` changes whenever someone renames themselves.
+    github_id: Mapped[int | None] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=True
+    )
+    github_login: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    @property
+    def has_linked_github(self) -> bool:
+        return self.github_id is not None
 
     repositories: Mapped[list[Repository]] = relationship(
         back_populates="owner",

@@ -59,15 +59,20 @@ def _split_definitions(create_table_sql: str) -> list[str]:
     return [re.sub(r"\s+", " ", part) for part in parts if part.strip()]
 
 
-def _columns_and_constraints(create_table_sql: str) -> tuple[list[str], set[str]]:
-    """Return column definitions in order, and constraints as an unordered set.
+def _columns_and_constraints(create_table_sql: str) -> tuple[set[str], set[str]]:
+    """Return column definitions and constraint definitions, both as sets.
 
-    Constraint *order* within CREATE TABLE carries no meaning, and Alembic emits
-    them in a different order than SQLAlchemy does; comparing them as a set
-    avoids a permanently-failing test that says nothing.
+    Order is deliberately ignored on both. Constraint order within CREATE TABLE
+    carries no meaning, and Alembic emits constraints in a different order than
+    SQLAlchemy does. Column order is likewise not semantic: a column added later
+    by `ALTER TABLE ... ADD COLUMN` lands at the end of the physical table even
+    though the model declares it in the middle. Comparing sets keeps the check
+    on what actually matters -- that the same columns exist with the same types,
+    nullability and defaults -- instead of failing on a difference no query can
+    observe.
     """
     definitions = _split_definitions(create_table_sql)
-    columns = [d for d in definitions if not d.startswith("CONSTRAINT")]
+    columns = {d for d in definitions if not d.startswith("CONSTRAINT")}
     constraints = {d for d in definitions if d.startswith("CONSTRAINT")}
     return columns, constraints
 
@@ -103,10 +108,36 @@ def migration_sql() -> str:
 
 @pytest.fixture(scope="module")
 def migration_tables(migration_sql: str) -> dict[str, str]:
+    """The CREATE TABLE statement for each table the migrations produce."""
     return {
         match.group(1): match.group(0)
         for match in re.finditer(r"CREATE TABLE (\w+) \((.*?)\n\);", migration_sql, re.S)
     }
+
+
+@pytest.fixture(scope="module")
+def migration_added_columns(migration_sql: str) -> dict[str, set[str]]:
+    """Columns added by later migrations via `ALTER TABLE ... ADD COLUMN`.
+
+    A table's final shape is its CREATE TABLE plus every subsequent ALTER, so
+    reading only CREATE TABLE would report every later-added column as missing.
+    """
+    added: dict[str, set[str]] = {}
+    for match in re.finditer(r"ALTER TABLE (\w+) ADD COLUMN (.+?);", migration_sql):
+        table = match.group(1)
+        definition = re.sub(r"\s+", " ", match.group(2)).strip()
+        added.setdefault(table, set()).add(definition)
+    return added
+
+
+def _migrated_columns(
+    table_name: str,
+    migration_tables: dict[str, str],
+    migration_added_columns: dict[str, set[str]],
+) -> set[str]:
+    """Every column the migrations leave on `table_name`."""
+    created, _ = _columns_and_constraints(migration_tables[table_name])
+    return created | migration_added_columns.get(table_name, set())
 
 
 class TestMigrationsMatchModels:
@@ -122,11 +153,19 @@ class TestMigrationsMatchModels:
         assert not extra, f"migrations create tables no model defines: {sorted(extra)}"
 
     @pytest.mark.parametrize("table_name", sorted(Base.metadata.tables))
-    def test_table_columns_match(self, table_name: str, migration_tables: dict[str, str]) -> None:
+    def test_table_columns_match(
+        self,
+        table_name: str,
+        migration_tables: dict[str, str],
+        migration_added_columns: dict[str, set[str]],
+    ) -> None:
         expected, _ = _columns_and_constraints(_model_ddl(table_name))
-        actual, _ = _columns_and_constraints(migration_tables[table_name])
+        actual = _migrated_columns(table_name, migration_tables, migration_added_columns)
 
-        assert actual == expected
+        assert actual == expected, (
+            f"columns only in the models: {sorted(expected - actual)}; "
+            f"only in the migrations: {sorted(actual - expected)}"
+        )
 
     @pytest.mark.parametrize("table_name", sorted(Base.metadata.tables))
     def test_table_constraints_match(

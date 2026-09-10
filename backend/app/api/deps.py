@@ -20,6 +20,8 @@ from app.core.security import InvalidTokenError, decode_access_token
 from app.db.models.user import User
 from app.db.redis import get_redis
 from app.db.session import get_sessionmaker
+from app.integrations.github.client import GitHubClient
+from app.integrations.github.factory import build_github_client
 from app.services import auth as auth_service
 
 
@@ -50,6 +52,24 @@ def get_app_settings(request: Request) -> Settings:
 AppSettings = Annotated[Settings, Depends(get_app_settings)]
 DbSession = Annotated[Session, Depends(get_db)]
 RedisClient = Annotated["redis.Redis", Depends(get_redis)]
+
+
+def get_github_client(request: Request) -> Iterator[GitHubClient]:
+    """Yield a GitHub client built from the running application's settings.
+
+    Whether this is the real client or the in-process mock is decided by
+    configuration; routes cannot tell, which is what lets the whole API be
+    exercised without GitHub credentials.
+    """
+    settings: Settings = request.app.state.settings
+    client = build_github_client(settings)
+    try:
+        yield client
+    finally:
+        client.close()
+
+
+GitHub = Annotated[GitHubClient, Depends(get_github_client)]
 
 
 # `auto_error=False` so a missing header reaches our own handler and produces

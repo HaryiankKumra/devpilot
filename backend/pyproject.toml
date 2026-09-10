@@ -20,7 +20,11 @@ dependencies = [
     # Argon2id is the current password-hashing recommendation; used directly
     # rather than through passlib, which is no longer actively maintained.
     "argon2-cffi>=23.1,<26.0",
-    "pyjwt>=2.9,<3.0",
+    # `crypto` pulls in `cryptography`, which PyJWT needs for the RS256
+    # signatures GitHub App authentication requires.
+    "pyjwt[crypto]>=2.9,<3.0",
+    # HTTP client for the GitHub API: connection pooling, timeouts and HTTP/2.
+    "httpx>=0.27,<1.0",
     # Backs Pydantic's EmailStr validation.
     "email-validator>=2.2,<3.0",
     # Supplies the SQLAlchemy `Vector` column type used by code_chunks.
