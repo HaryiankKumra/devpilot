@@ -15,15 +15,17 @@ the models, which is the drift these tests could otherwise hide.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, Table, create_engine, event
+from sqlalchemy import Engine, Table, create_engine, event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool, StaticPool
 
 from app.api.deps import get_db
 from app.core.config import Environment, Settings
@@ -164,3 +166,56 @@ def _reset_redis_cache() -> Iterator[None]:
     """Stop a cached Redis client leaking between tests."""
     yield
     get_redis.cache_clear()
+
+
+# --- Integration fixtures (real PostgreSQL) ---------------------------------
+# `code_chunks` holds a pgvector column with no SQLite equivalent, so anything
+# touching retrieval needs the real database. These tests are marked
+# `integration` and skip cleanly when it is not running, so the default suite
+# stays runnable with nothing installed.
+
+INTEGRATION_DATABASE_URL = os.environ.get(
+    "DEVPILOT_TEST_DATABASE_URL",
+    "postgresql+psycopg://devpilot:devpilot@localhost:5432/devpilot",
+)
+
+
+@pytest.fixture(scope="session")
+def integration_engine() -> Iterator[Engine]:
+    """A connection to a real PostgreSQL, or a skip if there is not one."""
+    engine = create_engine(INTEGRATION_DATABASE_URL, poolclass=NullPool)
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            has_vector = connection.execute(
+                text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+            ).first()
+    except OperationalError as exc:
+        pytest.skip(f"PostgreSQL is not reachable for integration tests: {exc}")
+
+    if has_vector is None:
+        pytest.skip("The `vector` extension is not installed in the test database.")
+
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def pg_session(integration_engine: Engine) -> Iterator[Session]:
+    """A session whose work is always rolled back.
+
+    The integration database is the same one the developer is using, so every
+    test runs inside a transaction that is discarded. Nothing a test writes
+    survives it.
+    """
+    connection = integration_engine.connect()
+    transaction = connection.begin()
+    session = Session(bind=connection, expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        session.close()
+        transaction.rollback()
+        connection.close()

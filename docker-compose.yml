@@ -68,8 +68,53 @@ services:
       # Bind-mount the source for hot reload. The image still contains a full
       # copy, so the container also runs correctly without this mount.
       - ./backend/app:/app/app:ro
+      # Migrations too, so a new one can be applied without rebuilding the
+      # image -- otherwise `alembic upgrade head` silently runs the version
+      # that was baked in at build time.
+      - ./backend/alembic:/app/alembic:ro
     command:
       ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    # Same image as the API: the worker imports the same models and services,
+    # so shipping one image keeps them impossible to version-skew.
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DEVPILOT_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-devpilot}:${POSTGRES_PASSWORD:-devpilot}@postgres:5432/${POSTGRES_DB:-devpilot}
+      DEVPILOT_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend/app:/app/app:ro
+      - ./backend/alembic:/app/alembic:ro
+    # `--concurrency=2` keeps two reviews in flight per worker. Reviews are
+    # I/O-bound (GitHub, then the LLM), so processes mostly wait; more than a
+    # couple would multiply memory for little throughput.
+    command:
+      [
+        "celery",
+        "-A",
+        "app.worker.celery_app:celery_app",
+        "worker",
+        "--loglevel=info",
+        "--concurrency=2",
+      ]
+    healthcheck:
+      # `inspect ping` asks the running worker to answer over the broker, which
+      # proves both the process and its Redis connection are alive.
+      test: ["CMD", "celery", "-A", "app.worker.celery_app:celery_app", "inspect", "ping", "-d", "celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy

@@ -8,10 +8,25 @@ relevant repository context with semantic search, ask an LLM for a strictly
 validated structured review, score the risk deterministically, and post the
 high-confidence findings back to the pull request.
 
-> **Status: Milestone 4 of 12 complete.** Accounts, the GitHub App integration
-> and verified webhook ingestion all work: a pull request on a connected
-> repository is recorded and a review job is queued. Nothing processes that
-> queue yet — the worker arrives in Milestone 5 — and no review is produced.
+> **Status: Milestone 7 of 12 complete.** The review pipeline now runs end to
+> end: a pull request is recorded, queued, and picked up by a worker that
+> fetches the diff, runs static analysis, asks a language model for a structured
+> review, discards every finding the diff does not support, computes a risk
+> score in Python, and stores the result.
+>
+> **It runs with no credentials at all.** `DEVPILOT_GITHUB_MODE=mock` and
+> `DEVPILOT_LLM_MODE=mock` are the defaults, so the whole thing works out of the
+> box and costs nothing. A mocked review labels itself `[Mock review — no
+> language model was called.]` and its findings sit below the posting threshold,
+> so it can never be mistaken for the real thing. See
+> [`docs/llm-setup.md`](docs/llm-setup.md) and
+> [`docs/github-app-setup.md`](docs/github-app-setup.md).
+>
+> Reviews are repository-aware: source is chunked, embedded and stored in
+> pgvector, and each review retrieves the existing code its diff refers to.
+>
+> Still to come: posting findings back to GitHub (Milestone 9) and the
+> dashboard (Milestone 10).
 > Pages that are routed but not built say so explicitly rather than showing
 > placeholder data.
 >
@@ -103,6 +118,8 @@ for the decisions that could reasonably have gone the other way.
 | Async     | Redis, Celery                                                       |
 | Packaging | Docker, Docker Compose, GitHub Actions                              |
 | Testing   | Pytest, Playwright, Locust                                          |
+| Analysis  | Ruff (parser-based, never executes reviewed code)                   |
+| AI        | Claude (`claude-opus-5`), Pydantic-validated structured output      |
 
 ## Quick start (Docker)
 
@@ -125,10 +142,15 @@ Compose waits for the Postgres and Redis healthchecks before starting the API,
 so the first request does not race database initialisation.
 
 ```bash
-docker compose logs -f api     # follow API logs
-docker compose down            # stop
-docker compose down -v         # stop and delete database volumes
+docker compose logs -f api      # follow API logs
+docker compose logs -f worker   # follow the review worker
+docker compose down             # stop
+docker compose down -v          # stop and delete database volumes
 ```
+
+Five services run: `postgres`, `redis`, `api`, `worker` and `frontend`. The
+worker shares the API's image so the two can never drift apart in the code they
+import.
 
 ## Running without Docker
 
@@ -198,6 +220,7 @@ endpoints:
 | GET    | `/api/v1/repositories`  | List tracked repositories            |
 | GET    | `/api/v1/repositories/installations` | GitHub App installations|
 | POST   | `/api/v1/repositories/sync` | Reconcile with an installation   |
+| POST   | `/api/v1/repositories/{id}/index` | Index for semantic search  |
 | GET    | `/api/v1/repositories/{id}` | One repository                   |
 | GET    | `/api/v1/repositories/{id}/pull-requests` | Its pull requests  |
 | POST   | `/api/v1/webhooks/github` | Receive a GitHub delivery          |
@@ -264,9 +287,14 @@ to PostgreSQL DDL offline and asserts they still match the ORM models — which 
 what catches the "edited a model, forgot the migration" drift that SQLite-based
 tests would otherwise hide.
 
-Tests that genuinely need PostgreSQL and Redis (pgvector similarity search,
-above all) are marked `integration` and can be excluded with
-`-m "not integration"`.
+Tests that genuinely need PostgreSQL — pgvector similarity search above all —
+are marked `integration`. They run against the Compose database inside a
+transaction that is rolled back, so nothing they write survives, and they skip
+cleanly when it is not running:
+
+```bash
+../.venv/Scripts/python -m pytest -m "not integration"   # no services needed
+```
 
 ## Project layout
 
@@ -301,11 +329,11 @@ what keeps business logic testable without HTTP.
 | 2   | Authentication and database models                   | Done   |
 | 3   | GitHub App integration and repository management     | Done   |
 | 4   | Webhook ingestion and idempotency                    | Done   |
-| 5   | Celery workers and asynchronous review jobs          | Next   |
-| 6   | PR diff retrieval and static analysis                |        |
-| 7   | LLM integration with structured output validation    |        |
-| 8   | Repository indexing and pgvector RAG                 |        |
-| 9   | Full review pipeline and GitHub comments             |        |
+| 5   | Celery workers and asynchronous review jobs          | Done   |
+| 6   | PR diff retrieval and static analysis                | Done   |
+| 7   | LLM integration with structured output validation    | Done   |
+| 8   | Repository indexing and pgvector RAG                 | Done   |
+| 9   | Full review pipeline and GitHub comments             | Next   |
 | 10  | React dashboard and review visualisation             |        |
 | 11  | Testing, security hardening, rate limiting, retries  |        |
 | 12  | Production Docker, CI/CD, deployment, documentation  |        |
@@ -315,6 +343,7 @@ what keeps business logic testable without HTTP.
 - [`docs/architecture.md`](docs/architecture.md) — components and boundaries
 - [`docs/engineering-tradeoffs.md`](docs/engineering-tradeoffs.md) — decisions and alternatives
 - [`docs/github-app-setup.md`](docs/github-app-setup.md) — connecting a real GitHub App
+- [`docs/llm-setup.md`](docs/llm-setup.md) — connecting a real language model, and what it costs
 
 ## License
 

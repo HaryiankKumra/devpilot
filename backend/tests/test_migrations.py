@@ -130,14 +130,41 @@ def migration_added_columns(migration_sql: str) -> dict[str, set[str]]:
     return added
 
 
+@pytest.fixture(scope="module")
+def migration_dropped_columns(migration_sql: str) -> dict[str, set[str]]:
+    """Column *names* removed by `ALTER TABLE ... DROP COLUMN`.
+
+    Names rather than definitions, because a DROP names only the column while
+    the CREATE that introduced it carries the full definition.
+    """
+    dropped: dict[str, set[str]] = {}
+    for match in re.finditer(r"ALTER TABLE (\w+) DROP COLUMN (\w+)", migration_sql):
+        dropped.setdefault(match.group(1), set()).add(match.group(2))
+    return dropped
+
+
+def _column_name(definition: str) -> str:
+    """The name from a column definition such as `embedding VECTOR(1024) NOT NULL`."""
+    return definition.split(" ", 1)[0].strip('"')
+
+
 def _migrated_columns(
     table_name: str,
     migration_tables: dict[str, str],
     migration_added_columns: dict[str, set[str]],
+    migration_dropped_columns: dict[str, set[str]],
 ) -> set[str]:
-    """Every column the migrations leave on `table_name`."""
+    """Every column the migrations leave on `table_name`.
+
+    The final shape is the CREATE TABLE, minus anything later dropped, plus
+    anything later added -- in that order, since a column can be dropped and
+    re-added with a different type.
+    """
     created, _ = _columns_and_constraints(migration_tables[table_name])
-    return created | migration_added_columns.get(table_name, set())
+    dropped = migration_dropped_columns.get(table_name, set())
+
+    surviving = {definition for definition in created if _column_name(definition) not in dropped}
+    return surviving | migration_added_columns.get(table_name, set())
 
 
 class TestMigrationsMatchModels:
@@ -158,9 +185,15 @@ class TestMigrationsMatchModels:
         table_name: str,
         migration_tables: dict[str, str],
         migration_added_columns: dict[str, set[str]],
+        migration_dropped_columns: dict[str, set[str]],
     ) -> None:
         expected, _ = _columns_and_constraints(_model_ddl(table_name))
-        actual = _migrated_columns(table_name, migration_tables, migration_added_columns)
+        actual = _migrated_columns(
+            table_name,
+            migration_tables,
+            migration_added_columns,
+            migration_dropped_columns,
+        )
 
         assert actual == expected, (
             f"columns only in the models: {sorted(expected - actual)}; "

@@ -15,6 +15,7 @@ from app.api.deps import CurrentUser, DbSession, GitHub
 from app.core.enums import PullRequestState
 from app.db.repositories.repository import PullRequestStore
 from app.schemas.repository import (
+    IndexResponse,
     InstallationRead,
     PullRequestRead,
     RepositoryRead,
@@ -22,6 +23,7 @@ from app.schemas.repository import (
     SyncResponse,
 )
 from app.services import repositories as repository_service
+from app.services.dispatch import dispatch_repository_index
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
 
@@ -113,3 +115,37 @@ def list_pull_requests(
     )
     found = PullRequestStore(session).list_for_repository(repository.id, state=state)
     return [PullRequestRead.model_validate(pull_request) for pull_request in found]
+
+
+@router.post(
+    "/{repository_id}/index",
+    response_model=IndexResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Index a repository for semantic search",
+    responses={404: {"description": "No such repository for this user."}},
+)
+def index_repository(
+    repository_id: uuid.UUID, user: CurrentUser, session: DbSession
+) -> IndexResponse:
+    """Queue an indexing run.
+
+    Answers 202 rather than doing the work: indexing walks the whole repository,
+    fetches every source file and calls an embedding API, which is far past what
+    an HTTP request should hold open.
+    """
+    repository = repository_service.get_owned_repository(
+        session, owner=user, repository_id=repository_id
+    )
+
+    celery_task_id = dispatch_repository_index(repository.id)
+
+    return IndexResponse(
+        repository_id=repository.id,
+        queued=celery_task_id is not None,
+        celery_task_id=celery_task_id,
+        detail=(
+            "Indexing queued."
+            if celery_task_id
+            else "Could not reach the task queue; indexing was not started."
+        ),
+    )

@@ -17,9 +17,12 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 WORKDIR /build
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# No compiler is installed here on purpose. Every dependency ships a prebuilt
+# manylinux wheel for CPython 3.12 -- `psycopg[binary]` bundles libpq, and
+# cryptography and argon2-cffi publish wheels too -- so apt-installing
+# build-essential cost roughly nine minutes of build time and produced nothing.
+# If a future dependency genuinely needs to compile, pip fails loudly and the
+# toolchain can be reinstated at this line.
 
 # Copy only the dependency manifest first: this layer is cached and rebuilt
 # only when dependencies actually change, not on every source edit.
@@ -48,6 +51,12 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=devpilot:devpilot app ./app
+
+# The migrations ship in the image so that `docker compose exec api alembic
+# upgrade head` works against the exact code the container is running. Without
+# them the image can serve traffic but cannot create the schema it needs.
+COPY --chown=devpilot:devpilot alembic.ini ./alembic.ini
+COPY --chown=devpilot:devpilot alembic ./alembic
 
 USER devpilot
 

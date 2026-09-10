@@ -24,11 +24,11 @@ if TYPE_CHECKING:
 
 FILE_PATH_MAX_LENGTH = 1024
 
-# Dimensionality of the embedding model's output. Fixed in the schema because
+# Dimensionality of `voyage-code-3` output. Fixed in the schema because
 # pgvector needs it at column-definition time, and because similarity is only
 # meaningful between vectors from the same model: changing models means a
 # migration and a full re-index, not a mixed table.
-EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_DIMENSIONS = 1024
 
 
 class CodeChunk(UUIDPrimaryKeyMixin, TimestampMixin, Base):

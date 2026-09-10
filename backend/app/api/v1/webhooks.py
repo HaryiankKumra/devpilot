@@ -17,6 +17,7 @@ the only thing separating GitHub from anyone who guessed the URL.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
@@ -25,6 +26,7 @@ from app.api.deps import AppSettings, DbSession
 from app.core.enums import WebhookEventStatus
 from app.core.exceptions import DevPilotError
 from app.core.logging import get_logger
+from app.db.repositories.review_job import ReviewJobStore
 from app.integrations.github.webhooks import (
     DELIVERY_HEADER,
     EVENT_HEADER,
@@ -34,6 +36,7 @@ from app.integrations.github.webhooks import (
 )
 from app.schemas.webhook import WebhookAck
 from app.services import webhooks as webhook_service
+from app.services.dispatch import dispatch_review_job
 from app.services.webhooks import DuplicateDeliveryError
 
 logger = get_logger(__name__)
@@ -143,6 +146,14 @@ async def receive_github_webhook(
     result = webhook_service.process_event(session, event=event)
     session.commit()
 
+    # Dispatch only after the commit. Redis and PostgreSQL share no transaction,
+    # so publishing first lets a worker look for a row that is not there yet --
+    # or never lands at all. See app/services/dispatch.py.
+    if result.review_job_id is not None:
+        celery_task_id = dispatch_review_job(uuid.UUID(result.review_job_id))
+        if celery_task_id is not None:
+            _record_celery_task_id(session, result.review_job_id, celery_task_id)
+
     if result.accepted_work:
         response.status_code = status.HTTP_202_ACCEPTED
 
@@ -152,3 +163,16 @@ async def receive_github_webhook(
         duplicate=False,
         review_job_id=result.review_job_id,
     )
+
+
+def _record_celery_task_id(session: Any, review_job_id: str, celery_task_id: str) -> None:
+    """Store the broker's task id so a row can be traced to worker logs.
+
+    Best-effort: the job is already queued and will run regardless, so a failure
+    to annotate it must not turn a successful webhook into a 500.
+    """
+    job = ReviewJobStore(session).get_by_id(uuid.UUID(review_job_id))
+    if job is None:
+        return
+    job.celery_task_id = celery_task_id
+    session.commit()

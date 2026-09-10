@@ -48,6 +48,8 @@ GITHUB_API_VERSION = "2022-11-28"
 ACCEPT_JSON = "application/vnd.github+json"
 # The diff media type returns a unified diff as text rather than a JSON object.
 ACCEPT_DIFF = "application/vnd.github.v3.diff"
+# The raw media type returns file bytes directly instead of a base64 envelope.
+ACCEPT_RAW = "application/vnd.github.raw"
 
 # When the limit is hit with no usable reset header, wait this long.
 DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 60
@@ -66,6 +68,16 @@ class GitHubClient(Protocol):
     def get_pull_request(
         self, installation_id: int, full_name: str, number: int
     ) -> GitHubPullRequest: ...
+
+    def get_pull_request_diff(self, installation_id: int, full_name: str, number: int) -> str: ...
+
+    def get_file_content(
+        self, installation_id: int, full_name: str, path: str, ref: str
+    ) -> str | None: ...
+
+    def list_repository_files(
+        self, installation_id: int, full_name: str, ref: str
+    ) -> list[str]: ...
 
     def exchange_oauth_code(self, code: str) -> GitHubOAuthToken: ...
 
@@ -276,6 +288,78 @@ class RestGitHubClient:
             token=self._installation_token(installation_id),
         )
         return GitHubPullRequest.model_validate(response.json())
+
+    def get_pull_request_diff(self, installation_id: int, full_name: str, number: int) -> str:
+        """Return the pull request as a unified diff.
+
+        The diff media type makes GitHub render the patch itself, which is far
+        cheaper than listing files and fetching each one. GitHub computes it
+        against the merge base, so it shows what the pull request changes rather
+        than everything that has happened on the base branch since.
+        """
+        response = self._request(
+            "GET",
+            f"/repos/{full_name}/pulls/{number}",
+            token=self._installation_token(installation_id),
+            accept=ACCEPT_DIFF,
+        )
+        return response.text
+
+    def get_file_content(
+        self, installation_id: int, full_name: str, path: str, ref: str
+    ) -> str | None:
+        """Return a file's contents at `ref`, or `None` if it is not readable.
+
+        Fetched with the raw media type so GitHub sends the bytes directly
+        rather than a JSON envelope with base64 inside it.
+
+        Returns `None` rather than raising for a missing file: a diff can name a
+        path that no longer exists at the head commit (deleted later in the
+        branch), and that is ordinary, not an error.
+        """
+        try:
+            response = self._request(
+                "GET",
+                f"/repos/{full_name}/contents/{path}",
+                token=self._installation_token(installation_id),
+                accept=ACCEPT_RAW,
+                params={"ref": ref},
+            )
+        except GitHubNotFoundError:
+            logger.info("github.file_absent", full_name=full_name, path=path, ref=ref)
+            return None
+
+        try:
+            return response.text
+        except UnicodeDecodeError:
+            # A binary file the diff did not flag. Nothing to analyse.
+            logger.info("github.file_not_text", full_name=full_name, path=path)
+            return None
+
+    def list_repository_files(self, installation_id: int, full_name: str, ref: str) -> list[str]:
+        """Return every file path in the repository at `ref`.
+
+        One recursive tree call rather than walking directories: the latter
+        would be hundreds of requests against the rate limit for a repository of
+        any size. Only blobs are returned -- trees are directories, and commits
+        are submodule pointers whose contents live in another repository we have
+        no access to.
+        """
+        response = self._request(
+            "GET",
+            f"/repos/{full_name}/git/trees/{ref}",
+            token=self._installation_token(installation_id),
+            params={"recursive": "1"},
+        )
+        payload = response.json()
+
+        if payload.get("truncated"):
+            # GitHub caps the tree response. Indexing what came back is more
+            # useful than refusing, but it must be visible in the logs.
+            logger.warning("github.tree_truncated", full_name=full_name, ref=ref)
+
+        tree = payload.get("tree", [])
+        return [item["path"] for item in tree if item.get("type") == "blob" and "path" in item]
 
     # --- OAuth (user identity, not installation access) ----------------------
 

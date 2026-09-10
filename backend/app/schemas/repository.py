@@ -80,3 +80,12 @@ class GitHubLinkStatus(BaseModel):
     # Present only when the app slug is configured; the UI hides the button
     # rather than showing a link that leads nowhere.
     install_url: str | None = None
+
+
+class IndexResponse(BaseModel):
+    """The outcome of asking for a repository to be indexed."""
+
+    repository_id: uuid.UUID
+    queued: bool = Field(description="False when the task queue was unreachable.")
+    celery_task_id: str | None = None
+    detail: str

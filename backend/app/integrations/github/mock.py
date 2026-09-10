@@ -112,6 +112,25 @@ class MockGitHubClient:
             raise GitHubNotFoundError(f"Mock GitHub has no {full_name}#{number}.")
         return MOCK_PULL_REQUEST
 
+    def get_pull_request_diff(self, installation_id: int, full_name: str, number: int) -> str:
+        """A small but genuine unified diff, including a deliberate flaw.
+
+        The added code has a real problem a linter will catch (an unused import
+        and a bare `except`), so the static-analysis stage has something honest
+        to find rather than always returning an empty list.
+        """
+        if full_name != MOCK_PULL_REQUEST_REPOSITORY or number != MOCK_PULL_REQUEST.number:
+            raise GitHubNotFoundError(f"Mock GitHub has no {full_name}#{number}.")
+        return MOCK_DIFF
+
+    def get_file_content(
+        self, installation_id: int, full_name: str, path: str, ref: str
+    ) -> str | None:
+        return MOCK_FILE_CONTENTS.get(path)
+
+    def list_repository_files(self, installation_id: int, full_name: str, ref: str) -> list[str]:
+        return sorted(MOCK_FILE_CONTENTS)
+
     def exchange_oauth_code(self, code: str) -> GitHubOAuthToken:
         return GitHubOAuthToken(
             access_token=MOCK_USER_ACCESS_TOKEN, token_type="bearer", scope="read:user"
@@ -122,6 +141,69 @@ class MockGitHubClient:
 
     def close(self) -> None:
         """Nothing to release; present so the Protocol is satisfied."""
+
+
+MOCK_DIFF = """diff --git a/checkout/coupons.py b/checkout/coupons.py
+index 1111111..2222222 100644
+--- a/checkout/coupons.py
++++ b/checkout/coupons.py
+@@ -1,6 +1,14 @@
+ import json
++import os
+ 
+ 
+ def apply_coupon(order, code):
+-    return order
++    try:
++        discount = LOOKUP[code]
++    except:
++        discount = 0
++    order["total"] = order["total"] - discount
++    return order
+"""
+
+# Keyed by path, as `get_file_content` receives it. This is the file as it
+# stands *after* the diff, which is what a linter should be run against.
+MOCK_COUPONS_FILE = """import json
+import os
+
+
+def apply_coupon(order, code):
+    try:
+        discount = LOOKUP[code]
+    except:
+        discount = 0
+    order["total"] = order["total"] - discount
+    return order
+"""
+
+# A second file, so retrieval has something to choose *between*. It defines the
+# LOOKUP table the changed code refers to, which is exactly the kind of context
+# retrieval is supposed to surface.
+MOCK_DISCOUNTS_FILE = '''"""Coupon definitions used across checkout."""
+
+LOOKUP = {
+    "WELCOME10": 10,
+    "SUMMER20": 20,
+}
+
+
+def is_valid_coupon(code):
+    """Return True when the coupon exists and has not expired."""
+    return code in LOOKUP
+'''
+
+MOCK_README = """# Checkout service
+
+Applies coupons to orders. Coupon codes are defined in `checkout/discounts.py`;
+never hardcode a discount amount at the call site.
+"""
+
+MOCK_FILE_CONTENTS: dict[str, str] = {
+    "checkout/coupons.py": MOCK_COUPONS_FILE,
+    "checkout/discounts.py": MOCK_DISCOUNTS_FILE,
+    "README.md": MOCK_README,
+}
 
 
 def mock_installation_expiry() -> datetime:

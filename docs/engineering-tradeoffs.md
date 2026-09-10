@@ -549,3 +549,600 @@ review is queued the moment the author says it is ready.
 
 **Cost:** someone who works permanently in draft mode gets no reviews. Making
 this configurable per repository is a natural later addition.
+
+---
+
+# Milestone 5 decisions
+
+## 31. `acks_late`, and paying for it with a conditional claim
+
+**Chosen:** `task_acks_late=True` and `task_reject_on_worker_lost=True`, with job
+claiming done as a single conditional UPDATE.
+
+**Alternative:** Celery's default, acknowledging a task when the worker receives
+it.
+
+**Why:** the default acknowledges on receipt, so a worker killed mid-review --
+a deploy, an OOM, a reclaimed spot instance -- silently loses the job. Nothing
+retries it and nothing records that it vanished. Acknowledging late means the
+broker never saw an ack and redelivers, so the work survives the crash.
+
+The cost is that a task can now be delivered twice, and two workers can hold it
+at once. That is why claiming is `UPDATE ... WHERE status = 'queued'` rather
+than a read followed by a write: the read-then-write version has a window in
+which both workers see `queued` and both proceed, and the review gets done
+twice. The database closes that window -- exactly one UPDATE reports a row.
+
+**Cost:** every task must be safe to receive twice, which constrains how future
+pipeline stages are written.
+
+## 32. Enqueue after commit, never inside the transaction
+
+**Chosen:** the webhook route commits the job row, and only then publishes the
+Celery task.
+
+**Alternative:** publish inside the request handler before committing, which
+reads more naturally.
+
+**Why:** Redis and PostgreSQL share no transaction. Publishing first lets a
+worker pick the task up before the commit lands -- or, if the transaction rolls
+back, instead of it -- and look for a row that does not exist. Committing first
+inverts the failure mode: a crash in the gap leaves a `queued` row that nobody
+was told about, which a periodic sweep can find later. A lost row is data loss;
+a delayed job is a delay.
+
+For the same reason a dispatch failure is logged and swallowed rather than
+raised. If Redis is down when a webhook arrives, the job is already safely
+recorded, and returning 500 would only make GitHub redeliver work we already
+have.
+
+**Cost:** a job can sit in `queued` unnoticed if the broker was down at exactly
+the wrong moment. The sweeper that fixes this is not written yet, and is noted
+for Milestone 11.
+
+## 33. A task takes a job id, not a job
+
+**Chosen:** `review_pull_request(review_job_id: str)`.
+
+**Alternative:** pass the pull request details in the message.
+
+**Why:** task arguments travel through Redis as JSON and may sit there for a
+long time -- after a retry with backoff, hours. Anything embedded in the message
+is a snapshot that was true when it was published. The database is the source of
+truth, so the message carries only a pointer to it and the worker reads current
+state. It also keeps secrets and large diffs out of the broker entirely.
+
+**Cost:** one extra query at the start of every task.
+
+## 34. Explicit retries instead of `autoretry_for`
+
+**Chosen:** catch transient errors, write the job back to `queued` with the
+error recorded, then call `self.retry()`.
+
+**Alternative:** Celery's `autoretry_for=(...)`, which is one line.
+
+**Why:** `autoretry_for` retries the *task* without touching the job row, so the
+database would show a job stuck in `running` while Celery quietly tried again,
+and a job that eventually exhausted its retries would have no record of why.
+Doing it by hand keeps the row and the broker in step, and preserves the reason
+for each failure along the way.
+
+**Cost:** more code in the task, and the retry path has to be tested rather than
+trusted.
+
+## 35. Only transient failures are retried
+
+**Chosen:** an explicit `TRANSIENT_ERRORS` tuple -- GitHub 5xx, rate limits,
+connection errors, timeouts. Everything else fails permanently on the first
+attempt.
+
+**Alternative:** retry every exception.
+
+**Why:** retrying a bug produces the same bug three times more slowly, and buries
+the real error under two duplicates. Worse, on a paid LLM call it costs three
+times as much to learn the same thing. Classifying up front means the error
+record says what actually happened and how many attempts it was worth.
+
+**Cost:** a genuinely transient failure of an unanticipated type is treated as
+permanent. Adding it to the tuple is a one-line change once observed.
+
+## 36. Honouring GitHub's `Retry-After` over our own backoff
+
+**Chosen:** when a rate limit carries `Retry-After`, wait exactly that long;
+otherwise back off exponentially from 30s, capped at 600s.
+
+**Alternative:** always use our own backoff curve.
+
+**Why:** GitHub knows precisely when the limit resets. Guessing shorter wastes a
+request against an exhausted budget and can extend the block; guessing longer
+idles a worker for no reason. Where GitHub does not say, exponential backoff with
+a cap is the standard compromise -- retrying immediately makes an overloaded API
+worse for everyone, and unbounded doubling eventually schedules a retry days out.
+
+**Cost:** two code paths for one decision, which is why the choice lives in a
+single tested function rather than inline in the task.
+
+## 37. The review pipeline is a documented seam, not a stub that pretends
+
+**Chosen:** `execute_review` raises `PipelineNotImplementedError`, and every job
+currently ends `failed` with that recorded as its reason.
+
+**Alternative:** return a placeholder review so the flow "works" end to end.
+
+**Why:** a placeholder review is indistinguishable from a real one in the
+database and on the dashboard, and it would make Milestones 6 to 9 look finished
+before they exist. Failing loudly with a named error means the queue, the worker
+and the failure handling are genuinely exercised, while the missing piece stays
+obviously missing. The error is classified permanent so it is not retried three
+times -- retrying cannot make an unwritten pipeline appear.
+
+**Cost:** the success path never executes in production today, so it is covered
+by substituting a pipeline that returns. That substitution is the only place a
+test stands in for real behaviour.
+
+## 38. The worker shares the API's image
+
+**Chosen:** one Dockerfile; the worker service overrides the command.
+
+**Alternative:** a separate, slimmer worker image.
+
+**Why:** the worker imports the same models, services and settings as the API. If
+the two were built separately they could drift a deploy apart and disagree about
+the schema they share -- the failure mode being a worker writing columns the API
+does not know about, or vice versa. One image makes that impossible and halves
+the build.
+
+**Cost:** the worker image carries uvicorn and the HTTP stack it never runs. A
+few megabytes, against a class of bug that is genuinely hard to diagnose.
+
+## 39. `worker_prefetch_multiplier=1`
+
+**Chosen:** a worker reserves one task at a time.
+
+**Alternative:** Celery's default of 4.
+
+**Why:** prefetching assumes tasks are short and uniform. Reviews are neither --
+one may take five seconds and the next five minutes. A worker that has reserved
+four tasks holds them even while busy, so they wait behind a slow review while
+another worker sits idle. With a multiplier of 1 the queue distributes to
+whoever is actually free.
+
+**Cost:** slightly more broker chatter, which is irrelevant at this task rate.
+
+## 40. JSON serialisation only
+
+**Chosen:** `accept_content=["json"]`.
+
+**Why:** Celery historically defaulted to `pickle`, which executes arbitrary code
+on deserialisation. Anyone who can write to Redis then has remote code execution
+on every worker. Restricting to JSON removes that entirely, and JSON is
+sufficient because tasks carry only an id.
+
+**Cost:** task arguments must be JSON-serialisable, which the id-only rule
+already required.
+
+---
+
+# Milestone 6 decisions
+
+## 41. Reporting only on lines the pull request changed
+
+**Chosen:** static-analysis findings on lines outside the diff are discarded.
+
+**Alternative:** report everything wrong with each changed file.
+
+**Why:** a linter run over a changed file surfaces every problem in it, and most
+of them predate the pull request. Posting those as review comments asks the
+author to fix code they did not write, in a change that is not about it. That is
+precisely how an automated reviewer becomes noise people mute -- and a muted
+reviewer catches nothing at all. The mock fixture demonstrates it: the file has
+an unused `json` import on line 1 that the diff never touches, and it is
+correctly dropped.
+
+**Cost:** a genuine problem introduced *by* the change but manifesting on an
+untouched line is missed. The LLM stage, which sees the whole file, is better
+placed to catch that class of thing anyway.
+
+## 42. Only analysers that parse, never execute
+
+**Chosen:** Ruff, invoked with `--isolated`.
+
+**Alternative:** richer tooling -- mypy with imports resolved, ESLint with the
+project's plugins, pytest collection.
+
+**Why:** the input is code from a stranger's pull request. Any tool that imports
+the module, resolves plugins from the repository, or honours a config file
+checked into it is a remote code execution vector pointed at our worker. Ruff
+parses source into an AST and never runs it. `--isolated` matters just as much:
+without it a pull request could ship a `pyproject.toml` that disables the rules
+which would have flagged it.
+
+**Cost:** shallower analysis than a type checker with full import resolution,
+and Python only. Adding a language means adding an analyser that satisfies the
+same constraint.
+
+## 43. Fetching whole files rather than analysing the diff
+
+**Chosen:** fetch each changed file at the head commit and analyse it in full,
+then filter findings to changed lines.
+
+**Alternative:** analyse the diff hunks alone.
+
+**Why:** a hunk is not a valid program. A linter given a fragment cannot resolve
+imports, see enclosing scope, or tell an undefined name from one defined twenty
+lines above the hunk. Analysing the whole file and filtering afterwards gets
+accurate results and still reports only what the author is responsible for.
+
+**Cost:** one extra API call per changed file, and files above the size limit
+are skipped rather than partially analysed.
+
+## 44. Refusing diffs that are too large
+
+**Chosen:** hard limits on diff bytes, changed files and per-file size, raised
+as a *permanent* failure.
+
+**Alternative:** review whatever arrives, truncating as needed.
+
+**Why:** the limit is not frugality. A 5,000-line diff produces a prompt no
+model reads carefully, and what comes back is confidently vague -- worse than no
+review, because it looks like one. Refusing with a clear reason is more honest.
+The failure is permanent rather than transient because the diff will not shrink
+on a retry.
+
+**Cost:** genuinely large refactors get no review. A future version could review
+them file by file rather than as one prompt.
+
+## 45. A missing analyser fails loudly instead of finding nothing
+
+**Chosen:** `AnalyzerUnavailableError` when the tool is not installed, and a
+`failed_analyzers` list threaded through to the review context when one crashes.
+
+**Alternative:** log a warning and return no findings, which is what the first
+implementation did.
+
+**Why:** this was found by running the worker rather than by testing it. Ruff
+was a development dependency, so the production image did not have it; the
+subprocess failed, the code returned an empty list, and the review reported
+zero findings and success. **Zero findings is indistinguishable from clean
+code.** A tool that silently downgrades itself while still claiming to have
+checked is worse than one that refuses -- people trust it and should not.
+
+**Cost:** a review can now fail for an operational reason rather than degrading.
+That is the intended trade: an incomplete review says so.
+
+## 46. Ruff runs with `--no-cache`
+
+**Chosen:** disable Ruff's cache.
+
+**Why:** also found only by running in the container. Ruff writes a cache
+directory into the working directory by default; the image runs as an
+unprivileged user and `/app` is root-owned, so it exited with a permission error
+and produced nothing. Caching buys nothing here regardless -- each invocation
+analyses one temporary file that is deleted immediately afterwards.
+
+**Cost:** none in this usage.
+
+## 47. Hand-written diff parsing
+
+**Chosen:** parse unified diffs directly rather than adding a library.
+
+**Alternative:** a package such as `unidiff`.
+
+**Why:** DevPilot needs one fact from a diff -- which lines in the new file were
+added or changed -- and that subset of the format is small and completely
+specified. A hand-rolled parser is about a hundred lines, can be read in one
+sitting, and is exhaustively tested. The line numbers it produces decide which
+line a review comment lands on, so being able to see exactly how they are
+derived is worth more than the dependency saved.
+
+**Cost:** edge cases have to be found and handled ourselves. The tests cover the
+ones that bite: `+++`/`---` headers that look like content, omitted hunk counts,
+renames, binary files, and "\\ No newline at end of file".
+
+---
+
+# Milestone 7 decisions
+
+## 48. The model is never asked for the risk score
+
+**Chosen:** the LLM schema contains `summary` and `findings` and nothing else.
+The 0-100 score is computed in Python from the validated severities.
+
+**Alternative:** the response format in the specification includes `risk_score`,
+so ask for it.
+
+**Why:** a model asked to rate risk gives a plausible number that varies between
+runs on byte-identical input. It cannot be unit tested, cannot be justified to a
+user who asks why their pull request scored 72, and cannot be tuned without
+editing a prompt and re-running everything. Deriving it from severities makes it
+reproducible, auditable and adjustable by changing a constant.
+
+The field is omitted from the schema entirely rather than requested and
+discarded: asking for a number we throw away wastes tokens and invites the model
+to reason about the wrong thing.
+
+**Cost:** a small divergence from the letter of the specification, in service of
+its stated intent ("use deterministic scoring rather than allowing the LLM to
+arbitrarily determine the final score").
+
+## 49. A severity floor on top of the weighted sum
+
+**Chosen:** `score = clamp(max(weighted_sum x 5, floor_of_worst_severity))`, with
+floors of 75/50/25/5 for critical/high/medium/low.
+
+**Alternative:** the weighted sum alone, as specified.
+
+**Why:** with the given weights, a pure sum makes eleven cosmetic findings (11)
+outrank one critical one (10). That inverts the thing the score exists to
+express. The floor guarantees the worst single finding puts the score in the
+band it belongs to, and the sum still differentiates within that band. The
+`describe_risk` labels use the same boundaries, so the words and the number can
+never disagree.
+
+**Cost:** two numbers to explain instead of one, and the scale factor is a
+judgement call. Both are constants with tests pinning the properties that
+matter.
+
+## 50. Validating the model's claims, not just its JSON
+
+**Chosen:** every finding is checked against the parsed diff. A finding citing a
+file the pull request did not touch, or a line it did not change, is discarded
+with a logged reason.
+
+**Alternative:** trust the schema. The response is valid JSON with correct types,
+after all.
+
+**Why:** this is what "never trust LLM output without validation" has to mean in
+practice. A model will confidently cite `src/auth/handler.py:412` for a pull
+request that touched neither. Pydantic cannot catch it -- the path is a
+well-formed string and the line a positive integer. Only the diff knows. Without
+this check, DevPilot would post review comments on lines that do not exist,
+which destroys trust in the tool faster than missing a bug does.
+
+Rejected findings are counted rather than silently dropped: a model that
+regularly invents paths is a prompt problem, and counting is the only way to
+notice.
+
+**Cost:** a genuine problem on an untouched line is discarded along with the
+hallucinations. That is the same tradeoff already made for static analysis, and
+for the same reason.
+
+## 51. Confidence gates posting, not storing
+
+**Chosen:** every validated finding is stored and shown on the dashboard;
+only those at or above `llm_min_confidence_to_post` are posted to GitHub.
+
+**Alternative:** discard low-confidence findings entirely, or post everything.
+
+**Why:** these are different questions. A finding worth recording is not always
+worth interrupting someone with, and a reviewer that posts its own guesses is
+one people mute. Keeping them visible on the dashboard means a curious author
+can still look, while the pull request stays quiet.
+
+**Cost:** the dashboard shows more than GitHub does, which has to be explained
+in the UI so the difference does not look like a bug.
+
+## 52. Retrying only on invalid responses
+
+**Chosen:** `request_review` retries when the model returns something unusable,
+and lets every other error propagate to the worker.
+
+**Why:** an invalid response is the one failure a retry genuinely fixes --
+generation is stochastic, so the same prompt can produce conforming output next
+time. A rate limit or a transient network failure is the worker's business,
+because only the worker can record the attempt on the job row and schedule the
+backoff. Retrying in two places would double the effective delay and hide
+attempts from the job's history.
+
+**Cost:** two retry mechanisms in the codebase, each with a clearly separate
+job.
+
+## 53. The mock provider restates the analyser rather than inventing a review
+
+**Chosen:** in mock mode, findings are derived from static-analysis output, every
+summary is prefixed `[Mock review - no language model was called.]`, and
+confidence is pinned at 0.5 -- below the default posting threshold.
+
+**Alternative:** return a plausible fabricated review so demos look better.
+
+**Why:** a fabricated review is indistinguishable from a real one in the
+database and on the dashboard. Someone would eventually screenshot it, or trust
+it. Restating the analyser gives the pipeline real, correctly-anchored data to
+carry end to end while making it impossible to mistake the output for judgement
+about the code. The sub-threshold confidence is a second guard: even wired to a
+live GitHub App, a mocked finding cannot be posted.
+
+**Cost:** mock reviews are not interesting to look at. That is the point.
+
+## 54. Structured output at request time, not parsed afterwards
+
+**Chosen:** `client.messages.parse()` with the Pydantic model as the output
+format, so the schema is sent with the request and the SDK returns a validated
+instance.
+
+**Alternative:** ask for JSON in the prompt and parse the reply.
+
+**Why:** prompt-requested JSON arrives wrapped in prose, in fenced code blocks,
+with trailing commentary, or subtly off-schema -- and every one of those is a
+retry that costs another call. Constraining the format at request time makes
+conformance a property of the request. `extra="forbid"` on the models becomes
+`additionalProperties: false` in the emitted schema, which is what makes the
+constraint strict rather than advisory.
+
+**Cost:** ties the implementation to a provider that supports constrained
+decoding. The `LLMProvider` Protocol keeps that dependency in one file.
+
+## 55. Adaptive thinking, effort `high`
+
+**Chosen:** `thinking: {type: "adaptive"}` with `output_config.effort` defaulting
+to `high`.
+
+**Why:** reviewing a diff is exactly the work reasoning helps with -- the model
+has to hold the change in mind and consider what it breaks, rather than
+pattern-matching the first suspicious line. Effort is the cost lever that trades
+thoroughness for spend within one model, and code review is the workload where
+it repays; `medium` is exposed in configuration for routine changes.
+
+**Cost:** more tokens per review than a non-reasoning call. Both settings are
+configuration, and `docs/llm-setup.md` documents them as the first thing to turn
+down.
+
+## 56. Only the worker holds the API key
+
+**Chosen:** the model is called from the Celery worker; the API process never
+constructs a provider.
+
+**Why:** the API is internet-facing and handles unauthenticated webhooks. The
+worker is not reachable from outside at all. Keeping the billing credential out
+of the process with the larger attack surface is free, and it means the two can
+be deployed with different secrets.
+
+**Cost:** none. It falls out of the pipeline already living on the worker.
+
+---
+
+# Milestone 8 decisions
+
+## 57. A mock embedder that produces meaningful distances
+
+**Chosen:** feature hashing -- each token hashed to a dimension, the vector
+L2-normalised -- so texts sharing vocabulary genuinely land near each other.
+
+**Alternative:** random vectors, which is what most mock embedders return.
+
+**Why:** random vectors make retrieval *run* while making it meaningless. Every
+search returns arbitrary chunks, so nothing downstream can be judged and the
+integration tests assert only that rows came back. Feature hashing is
+deterministic, needs no network, and produces distances that mean something:
+the tests can assert that a change reading `LOOKUP` retrieves the file defining
+`LOOKUP`, which is the actual behaviour under test.
+
+The limitation is stated in the module docstring rather than hidden: **this is
+lexical, not semantic.** It matches shared words and will not connect
+"authenticate" to "login". It is enough to develop and test against, and not a
+substitute for a real embedding model.
+
+**Cost:** two embedding implementations. The Protocol keeps them honest.
+
+## 58. Voyage for embeddings, Claude for reviewing
+
+**Chosen:** `voyage-code-3` for retrieval, Claude for the review itself.
+
+**Why:** Anthropic has no embeddings endpoint and recommends Voyage, so a second
+vendor is unavoidable rather than chosen. `voyage-code-3` is trained on code
+specifically, which matters: a general-purpose text embedder treats source as
+prose and retrieves on comments and identifier spelling rather than on what the
+code does.
+
+**Cost:** a second API key for anyone running in full live mode. Both default to
+mock, so neither is needed to run the project.
+
+## 59. Chunking on line boundaries with overlap
+
+**Chosen:** 60-line chunks overlapping by 10, split on line boundaries.
+
+**Alternative:** a fixed character count, which is simpler.
+
+**Why:** a character split cuts through the middle of a function signature or a
+string literal, and the fragment either misleads the model or is useless to it.
+Line boundaries keep every chunk independently readable. The overlap means a
+function spanning a boundary appears whole in one of the two chunks covering
+it -- without it, the most interesting code is exactly the code that gets split.
+
+**Cost:** ~17% more chunks than non-overlapping, so ~17% more embedding spend
+and storage. Cheap next to retrieving half a function.
+
+## 60. Content-hash deduplication on re-index
+
+**Chosen:** hash each chunk's content; skip embedding anything already stored.
+
+**Why:** embedding is the expensive part of indexing -- a paid API call per
+batch -- and most of a repository is unchanged between runs. Hashing turns
+re-indexing from "embed everything again" into "embed what changed", which is
+the difference between a re-index costing pennies and costing what the first one
+did. The integration test asserts a second index creates zero chunks.
+
+**Cost:** a hash per chunk, which is nothing, and a `content_hash` column, which
+is already the natural de-duplication key.
+
+## 61. Deleting chunks whose content is gone
+
+**Chosen:** after indexing, remove stored chunks whose hash is not in the current
+set.
+
+**Alternative:** only ever add.
+
+**Why:** otherwise deleted code stays retrievable forever. The model is shown a
+function that no longer exists, with a file path and line range that make it
+look current, and reasons about the change as though it were still there. Stale
+context is worse than no context because it is confidently wrong.
+
+**Cost:** a delete per indexing run, and a full re-index is required to reclaim
+space after a large deletion.
+
+## 62. A distance ceiling on retrieval
+
+**Chosen:** discard results beyond `retrieval_max_distance` (0.75 cosine).
+
+**Why:** a nearest-neighbour search always returns its k nearest rows, however
+far away they are. Without a ceiling, a change to coupon logic in a repository
+containing nothing similar still retrieves six chunks, and the model is handed
+irrelevant code presented as relevant context -- which is actively worse than an
+empty section, because the prompt says this code is related.
+
+**Cost:** the threshold is a tuning parameter, and too tight a value returns
+nothing. The integration test pins both ends: the default retrieves, and 0.01
+retrieves nothing.
+
+## 63. Excluding the changed files from retrieval
+
+**Chosen:** chunks from files in the diff are filtered out of results.
+
+**Why:** they are already in the prompt as the diff. Retrieving them again
+spends the context budget on duplicates instead of the surrounding code the
+model cannot otherwise see -- which is the entire reason retrieval exists.
+
+**Cost:** a chunk from a changed file that would have added context beyond the
+diff hunk is lost. The hunks already carry several lines of surrounding context.
+
+## 64. HNSW rather than IVFFlat
+
+**Chosen:** an HNSW index on `embedding vector_cosine_ops`.
+
+**Why:** IVFFlat computes its list centroids at build time from existing data,
+so an index created on an empty table -- which is exactly what a migration does
+-- is worthless until rebuilt after data lands. HNSW builds incrementally and is
+useful immediately. The operator class matters as much as the index type: an
+index built for a different distance operator is silently ignored by the
+planner, which is a uniquely annoying way to lose performance.
+
+**Cost:** HNSW uses more memory and builds more slowly than IVFFlat at large
+scale. Neither is a concern at the size this indexes.
+
+## 65. Retrieval degrades rather than fails
+
+**Chosen:** a repository that has never been indexed, or an embedding provider
+that is down, produces a review *without* repository context.
+
+**Alternative:** fail the job.
+
+**Why:** retrieval is an enhancement. The diff and the static-analysis output
+are still there, and a review based on them is worth having. Failing the whole
+job because an optional stage was unavailable trades a good review for no
+review. The prompt says plainly when nothing was retrieved, so the model is not
+left to assume it saw everything.
+
+**Cost:** a silently degraded review is possible. The log line and the
+`retrieved_chunks` count on every completed review make it visible.
+
+## 66. Retrieved code is labelled "not under review"
+
+**Chosen:** the prompt section for retrieved chunks says explicitly that the
+code is context and must not be commented on.
+
+**Why:** without it the model reports problems in the retrieved code -- often
+real ones -- and validation then discards every one of them for citing lines
+outside the diff. That wastes output tokens and, worse, means the model spent
+its attention on code the author did not touch.
+
+**Cost:** a few dozen words of prompt. It pays for itself in the first review.
