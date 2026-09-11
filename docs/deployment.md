@@ -391,10 +391,15 @@ application rewrites it to the installed driver. Create the Neon project in
 the round trip, and a database on the other side of the Pacific adds ~200 ms
 to each one.
 
+Use Neon's **direct** endpoint, not the pooled one: if the hostname contains
+`-pooler`, remove it. The pooled endpoint is PgBouncer, which adds nothing for
+a single instance with its own pool and, in transaction mode, cannot promise
+that per-session settings survive. (Entry 125 in the tradeoffs log records how
+the pooled endpoint rejected the first deploy outright.)
+
 `render.yaml` raises `DEVPILOT_DB_CONNECT_TIMEOUT_SECONDS` to 15. Neon's compute
-suspends when idle and takes a few seconds to wake; the 3-second default, right
-for a database on the same Docker network, cut every wake-up connection off
-mid-handshake and left readiness reporting `OperationalError` indefinitely.
+suspends when idle and takes a few seconds to wake; the 3-second default is
+right for a database on the same Docker network and too tight for that.
 
 The Compose deployment above remains the reference. This one is what you run
 when a VM is not an option.

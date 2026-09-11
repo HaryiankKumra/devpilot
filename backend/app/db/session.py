@@ -14,12 +14,12 @@ test suite both import it before a database necessarily exists.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -50,15 +50,43 @@ def build_engine_kwargs(settings: Settings) -> dict[str, Any]:
         "pool_recycle": 1800,
         "connect_args": {
             "connect_timeout": settings.db_connect_timeout_seconds,
-            "options": f"-c statement_timeout={settings.db_statement_timeout_ms}",
+            # Deliberately no `options=-c statement_timeout=...` here. That
+            # rides in the startup packet, and connection poolers refuse it:
+            # Neon's pooled endpoint answers "unsupported startup parameter in
+            # options" and the connection never opens. The timeout is applied
+            # with a SET after connecting instead; see `build_engine`.
         },
         "echo": False,
     }
 
 
+def statement_timeout_listener(settings: Settings) -> Callable[[Any, Any], None]:
+    """Return a pool `connect` listener that applies the statement timeout.
+
+    Runs once per physical connection, as an ordinary statement rather than a
+    startup option, so it works through poolers that reject startup options.
+    Through a transaction-mode pooler the setting may not persist across
+    transactions -- a weaker guarantee, but a working connection with a
+    best-effort timeout beats a refused one.
+
+    A named function rather than a closure inside `build_engine` so a test can
+    call it with a fake connection without firing SQLAlchemy's own dialect
+    listeners on the same event.
+    """
+    statement = f"SET statement_timeout = {int(settings.db_statement_timeout_ms)}"
+
+    def apply_statement_timeout(dbapi_connection: Any, _record: Any) -> None:
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute(statement)
+
+    return apply_statement_timeout
+
+
 def build_engine(settings: Settings) -> Engine:
     """Create a connection pool configured to fail fast rather than hang."""
-    return create_engine(str(settings.database_url), **build_engine_kwargs(settings))
+    engine = create_engine(str(settings.database_url), **build_engine_kwargs(settings))
+    event.listen(engine, "connect", statement_timeout_listener(settings))
+    return engine
 
 
 @lru_cache(maxsize=1)

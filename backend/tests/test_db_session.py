@@ -8,7 +8,13 @@ answers 503 and one that hangs until the client gives up.
 from __future__ import annotations
 
 from app.core.config import Settings
-from app.db.session import build_engine, build_engine_kwargs, get_engine, get_sessionmaker
+from app.db.session import (
+    build_engine,
+    build_engine_kwargs,
+    get_engine,
+    get_sessionmaker,
+    statement_timeout_listener,
+)
 
 
 class TestEngineConfiguration:
@@ -18,13 +24,31 @@ class TestEngineConfiguration:
 
         assert kwargs["connect_args"]["connect_timeout"] == settings.db_connect_timeout_seconds
 
-    def test_bounds_the_time_a_single_statement_may_run(self, settings: Settings) -> None:
-        kwargs = build_engine_kwargs(settings)
+    def test_sends_no_startup_options(self, settings: Settings) -> None:
+        """Regression: `options=-c statement_timeout=...` in the startup packet
+        is refused by connection poolers (Neon's pooled endpoint: "unsupported
+        startup parameter in options"), so the connection never opens. The
+        timeout is applied by a SET after connecting instead."""
+        assert "options" not in build_engine_kwargs(settings)["connect_args"]
 
-        assert (
-            f"statement_timeout={settings.db_statement_timeout_ms}"
-            in kwargs["connect_args"]["options"]
+    def test_applies_the_statement_timeout_after_connecting(self, settings: Settings) -> None:
+        """The timeout still exists; it just arrives as a statement."""
+        from unittest.mock import MagicMock
+
+        dbapi_connection = MagicMock()
+        cursor = dbapi_connection.cursor.return_value.__enter__.return_value
+
+        statement_timeout_listener(settings)(dbapi_connection, MagicMock())
+
+        cursor.execute.assert_called_once_with(
+            f"SET statement_timeout = {settings.db_statement_timeout_ms}"
         )
+
+    def test_registers_the_timeout_listener_on_the_pool(self, settings: Settings) -> None:
+        engine = build_engine(settings)
+
+        listener_names = [fn.__name__ for fn in engine.pool.dispatch.connect]
+        assert "apply_statement_timeout" in listener_names
 
     def test_bounds_the_wait_for_a_free_pool_slot(self, settings: Settings) -> None:
         assert build_engine_kwargs(settings)["pool_timeout"] == settings.db_pool_timeout_seconds

@@ -2440,26 +2440,39 @@ migration takes. Neither matters at this size.
 not automatically transfer to the next. Entry 85 was known; it still had to be
 rediscovered because the new entrypoint was written without re-reading it.
 
-## 125. Connect timeouts are a property of the deployment, not the code
+## 125. The statement timeout is set after connecting, not in the startup packet
 
-**Chosen:** `render.yaml` sets the database connect timeout to 15 seconds; the
-code default stays at 3.
+**Chosen:** `SET statement_timeout = <ms>` runs on every new physical
+connection from a pool `connect` listener. The engine sends no `options` in
+its connection arguments.
 
-**Why:** three seconds is right when PostgreSQL is a container on the same
-Docker network -- it turns "the database is down" into a fast 503 instead of a
-hung request, which is why entry 3 chose it. Against a serverless database it
-is wrong in a way that hides itself: Neon suspends an idle compute and takes a
-few seconds to wake, the first connection times out before the wake completes,
-the compute sees no completed connection and suspends again, and readiness
-reports `OperationalError` on every probe with a latency of exactly the timeout.
-Migrations at startup succeeded, because Alembic sets no timeout, which made
-the failure look like something other than what it was.
+**Why:** the first live deploy answered every request with `OperationalError`.
+The first diagnosis was wrong: the connect timeout looked like the culprit
+(Neon suspends idle computes, and three seconds is tight for a wake-up), so
+`render.yaml` raised it to 15 and nothing changed. The log had the real cause
+all along:
 
-Raising the default in code would give the Compose deployment a worse failure
-mode to protect a deployment it is not running. The value belongs beside the
-database it is tuned for.
+    unsupported startup parameter in options: statement_timeout.
+    Please use unpooled connection or remove this parameter from the startup package.
 
-**Cost:** a readiness probe against a genuinely dead database now takes up to
-15 seconds to say so on Render. The liveness probe, which the platform actually
-watches, touches no dependency and is unaffected.
+Entry 3 passed the timeout as `options=-c statement_timeout=...`, which libpq
+sends inside the startup packet. Neon's pooled endpoint (`-pooler` in the
+hostname) is PgBouncer, and PgBouncer refuses startup parameters it does not
+recognise -- the connection never opens at all. Migrations succeeded because
+Alembic builds its own engine with no `options`, which made the application's
+failure look like a network or timing problem rather than a protocol one.
 
+`SET` after connecting is an ordinary statement and every pooler passes it
+through. The listener lives on the pool, so it runs once per physical
+connection and never per checkout.
+
+**Cost:** one extra round trip per new connection, which the pool amortises
+over its lifetime. Through a *transaction-mode* pooler the setting can be lost
+when the pooler hands the server connection to another client; the timeout
+becomes best-effort there. That is still strictly better than the alternative,
+which was no connection. The direct (unpooled) Neon endpoint has neither
+limitation and is what the deployment docs recommend.
+
+The 15-second connect timeout stays in `render.yaml`: it was not the cause,
+but Neon's wake-up latency is real and three seconds remains the wrong budget
+for a database that is not on the same network.
