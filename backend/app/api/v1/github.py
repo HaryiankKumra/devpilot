@@ -18,7 +18,7 @@ from app.core.logging import get_logger
 from app.db.repositories.user import UserRepository
 from app.integrations.github.exceptions import GitHubConfigurationError
 from app.schemas.auth import UserRead
-from app.schemas.repository import GitHubLinkStatus
+from app.schemas.repository import GitHubAuthorizeStart, GitHubLinkStatus
 from app.services import github_link
 
 logger = get_logger(__name__)
@@ -46,16 +46,19 @@ def link_status(user: CurrentUser, settings: AppSettings) -> GitHubLinkStatus:
 
 @router.get(
     "/authorize",
-    status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    response_model=GitHubAuthorizeStart,
     summary="Begin linking a GitHub account",
-    response_class=RedirectResponse,
 )
-def authorize(user: CurrentUser, settings: AppSettings) -> RedirectResponse:
-    """Redirect to GitHub carrying a signed, short-lived state parameter."""
-    return RedirectResponse(
-        github_link.build_authorize_url(user, settings),
-        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-    )
+def authorize(user: CurrentUser, settings: AppSettings) -> GitHubAuthorizeStart:
+    """Return the URL that starts the OAuth flow, carrying a signed state.
+
+    JSON rather than a redirect: this route needs the Bearer token to know
+    *which* user is linking, and a browser navigation cannot send one. The
+    frontend calls this with the token, then navigates to the URL it gets back.
+    The signed `state` inside it is what ties the eventual callback to this
+    user, so nothing is lost by the extra hop.
+    """
+    return GitHubAuthorizeStart(authorize_url=github_link.build_authorize_url(user, settings))
 
 
 @router.get(

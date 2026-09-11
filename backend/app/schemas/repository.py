@@ -82,6 +82,19 @@ class GitHubLinkStatus(BaseModel):
     install_url: str | None = None
 
 
+class GitHubAuthorizeStart(BaseModel):
+    """Where the browser should go to begin linking a GitHub account.
+
+    Returned as JSON rather than as a redirect on purpose. The endpoint that
+    produces it requires a Bearer token, and a plain browser navigation cannot
+    carry one -- so the frontend fetches this with the token attached and then
+    navigates to `authorize_url` itself. A 307 here would 401 on every real
+    click.
+    """
+
+    authorize_url: str
+
+
 class IndexResponse(BaseModel):
     """The outcome of asking for a repository to be indexed."""
 

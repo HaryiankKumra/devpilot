@@ -50,16 +50,30 @@ export function RepositoriesPage() {
       {isPending && <LoadingState label="Loading repositories…" />}
       {isError && <ErrorState message={error.message} onRetry={() => void refetch()} />}
 
-      {repositories && repositories.length === 0 && (
+      {repositories && repositories.length === 0 && installationId === undefined && (
+        /* An installation can only be synced by the account whose linked GitHub
+           identity owns it, so until the account is linked there is nothing to
+           offer -- and saying so beats a Sync button that does nothing. */
+        <EmptyState
+          title="Connect GitHub first"
+          description="DevPilot needs to know which GitHub account is yours before it can tell which App installation to sync from."
+          action={
+            <Link
+              to="/settings"
+              className="inline-flex items-center rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700"
+            >
+              Connect GitHub
+            </Link>
+          }
+        />
+      )}
+
+      {repositories && repositories.length === 0 && installationId !== undefined && (
         <EmptyState
           title="No repositories connected"
           description="Install the DevPilot GitHub App on a repository, then press Sync. Running in mock mode? Sync anyway — a demo repository is provided."
           action={
-            installationId !== undefined && (
-              <Button onClick={() => sync.mutate(installationId)}>
-                Sync from GitHub
-              </Button>
-            )
+            <Button onClick={() => sync.mutate(installationId)}>Sync from GitHub</Button>
           }
         />
       )}

@@ -1999,3 +1999,125 @@ returned no rows -- the sync had worked for an account with no linked GitHub
 identity at all, which it should never have been able to do. No test caught it
 because every test supplied the one installation the mock exposes; the hole is
 only visible when the id and the caller can disagree.
+
+## 107. An installation can only be synced by the identity that owns it
+
+**Chosen:** `POST /repositories/sync` verifies that the requested installation
+belongs to the caller's linked GitHub identity, and `GET /repositories/
+installations` returns only those installations. A user with no linked identity
+owns none.
+
+**What it was before:** the sync endpoint took an `installation_id` from the
+request body and used it. `list_installations` returned every installation of
+the App to any signed-in user.
+
+**Why it mattered:** DevPilot authenticates to GitHub as the *App*, not as the
+user, so it will mint an installation token for any id it is handed. Together
+the two endpoints were a complete attack: list everyone's installations, pick
+one, sync it, and read the names and privacy flags of somebody else's private
+repositories into your own account -- then index them and read their contents.
+Installation ids are sequential integers, so the listing was a convenience
+rather than a requirement.
+
+**How it was found:** not by a test. The first real user synced 42 repositories
+while their `github_id` was still `NULL`, which should have been impossible. It
+took a real installation to notice, because in mock mode there is one user and
+one installation and nothing to cross.
+
+**Cost:** personal installations only. The check compares the installation's
+`account.id` to the user's `github_id`, which is exactly right for an App
+installed on a user account and wrong for one installed on an organisation the
+user merely belongs to. Supporting that needs an organisation-membership check
+and a permission the App does not currently request. Documented as a
+limitation; it is the next thing to do if anyone installs on an org.
+
+## 108. The OAuth link starts with a fetch, not a link
+
+**Chosen:** `GET /github/authorize` returns `{"authorize_url": ...}` as JSON.
+The frontend fetches it with the Bearer token and then navigates.
+
+**What it was before:** a `307` redirect -- and a frontend comment noting that
+nothing could use it, because the route needs the token and a plain navigation
+cannot send one. So there was no *Connect GitHub* button at all. The feature
+was unfinished, and the only reason anything worked was the hole in entry 107.
+
+**Why the two-hop shape:** the route has to know *which* user is linking, and
+that comes from the token. An `<a href>` cannot carry a header. Alternatives --
+putting the token in the query string, or minting a one-time link -- either leak
+the token into browser history and server logs, or add a second token type to
+manage. Fetching the URL and then navigating costs one round trip and nothing
+else; the signed `state` inside the URL still ties the callback to the user.
+
+**Cost:** a button that does a fetch before navigating feels marginally slower
+than a link. Nobody will notice.
+
+## 109. Mock mode completes the OAuth round trip locally
+
+**Chosen:** in mock mode the authorize URL points at DevPilot's *own* callback
+with a placeholder code. The callback then runs unchanged: state verified, code
+exchanged through the mock client, identity recorded.
+
+**Alternative:** in mock mode, write the identity straight onto the user and
+skip the flow.
+
+**Why:** the state check is the one security-relevant step in linking, and a
+browser is the only place it is exercised end to end. Skipping it in the only
+mode a browser test can run in would leave it untested exactly where it matters.
+Routing through the real callback means the e2e suite proves the whole thing
+works, with no GitHub account involved.
+
+The mock's OAuth identity was also changed to be the mock installation's owner.
+Previously they were different accounts -- an organisation owned the
+installation, a user did the linking -- which under entry 107 means the linked
+user could never sync anything. The mock now models a personal installation,
+which is the shape a developer running this locally actually has.
+
+**Cost:** mock mode has a code path production never takes. It is one `if` in
+`build_authorize_url`, and it is the reason the browser tests can test linking.
+
+## 110. Browser tests that need GitHub share one account
+
+**Chosen:** the e2e tests that link and sync sign in as a single deterministic
+account (`e2e-github-owner@example.com`), registering it on first use. Every
+other test still registers a fresh account.
+
+**Why:** a GitHub identity can be linked to exactly one DevPilot account -- a
+`UNIQUE` index, and a correct one, since otherwise anyone could attach your
+GitHub identity to their account. Mock mode has exactly one identity. So tests
+that each register a fresh account and then all try to link it are modelling
+something impossible, and the second one is refused with `409`, correctly. The
+constraint was right; the test design was wrong.
+
+Sharing one account is what a real person with one GitHub login does. The link
+persists between runs, so the helper is idempotent -- and it waits for the
+status to load before deciding, because checking synchronously read "not
+connected" on every visit and then waited for a button that would never appear.
+
+**Cost:** those tests share state through the database and run in order. They
+already had to, since the suite runs serially against one backend.
+
+**How it was found:** the leftover link from a failed run. A random account from
+an earlier run still held the identity, so the owner account could not claim it.
+CI starts from an empty database and cannot hit this; locally it needed one
+manual `UPDATE`.
+
+## 111. Vite polls for file changes inside Docker
+
+**Chosen:** `server.watch.usePolling`, enabled by `CHOKIDAR_USEPOLLING=true` in
+the Compose environment.
+
+**Why:** filesystem change events do not cross a Windows or macOS bind mount.
+The file inside the container changes, `inotify` never fires, and Vite keeps
+serving its cached transform of the old file. The failure is invisible: the dev
+server is up, the page loads, hot reload appears to work, and the code on
+screen is stale. Every frontend edit in this project had been going through a
+container that was not serving it.
+
+**How it was found:** a Playwright test waiting for a button that the source
+file contained and the served module did not. Verified directly: the file in
+the container had the change; `GET /src/pages/SettingsPage.tsx` from the dev
+server did not.
+
+**Cost:** polling costs CPU proportional to the file count, which is why it is
+opt-in rather than always on. A native Linux checkout, where events work, is not
+made to pay for it.

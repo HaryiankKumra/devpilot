@@ -155,6 +155,10 @@ services:
       # The browser resolves this, not the Compose network, so it must be a
       # host-visible address rather than `http://api:8000`.
       VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      # Filesystem events do not cross a Windows/macOS bind mount, so without
+      # polling Vite serves stale code while appearing to hot-reload. See the
+      # `server.watch` comment in vite.config.ts.
+      CHOKIDAR_USEPOLLING: "true"
     ports:
       - "5173:5173"
     volumes:

@@ -39,9 +39,12 @@ logger = get_logger(__name__)
 MOCK_INSTALLATION_ID = 10_000_001
 MOCK_USER_ACCESS_TOKEN = "mock-user-access-token"
 
-MOCK_ACCOUNT = GitHubAccount(
-    id=4_242_001, login="devpilot-demo", type="Organization", avatar_url=None
-)
+# A *User* account, and the same one the mock OAuth flow reports. That is
+# deliberate: an installation must belong to the linked identity of whoever
+# syncs it, so the mock has to model a personal installation -- the shape a
+# developer running this locally actually has. An organisation install would
+# need membership checks that do not exist yet.
+MOCK_ACCOUNT = GitHubAccount(id=4_242_001, login="devpilot-demo", type="User", avatar_url=None)
 
 MOCK_REPOSITORIES: tuple[GitHubRepository, ...] = (
     GitHubRepository(
@@ -180,7 +183,8 @@ class MockGitHubClient:
         )
 
     def get_authenticated_user(self, user_access_token: str) -> GitHubAccount:
-        return GitHubAccount(id=4_242_100, login="demo-developer", type="User")
+        # The installation's owner, so a linked user can sync it. See MOCK_ACCOUNT.
+        return MOCK_ACCOUNT
 
     def close(self) -> None:
         """Nothing to release; present so the Protocol is satisfied."""

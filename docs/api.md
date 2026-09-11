@@ -168,7 +168,7 @@ may you read".
 | Endpoint | Notes |
 |---|---|
 | `GET /api/v1/github/status` *(auth)* | Whether an identity is linked, and which |
-| `GET /api/v1/github/authorize` *(auth)* | **307** to GitHub with a signed `state` |
+| `GET /api/v1/github/authorize` *(auth)* | **200** `{"authorize_url"}` — the frontend fetches this with the token, then navigates |
 | `GET /api/v1/github/callback` | **307** back to the frontend; **400** on a bad `state` |
 | `DELETE /api/v1/github/link` *(auth)* | Unlink |
 
@@ -189,8 +189,12 @@ Every repository this user tracks.
 
 ### `GET /api/v1/repositories/installations` → 200 *(auth)*
 
-GitHub App installations visible to the linked identity. The user picks one to
-sync from.
+GitHub App installations **owned by the caller's linked GitHub identity**. The
+user picks one to sync from. An account with no linked identity gets an empty
+list — there is nothing to match it against.
+
+GitHub's own endpoint returns every installation of the App; filtering here is
+what stops one user seeing another's.
 
 ### `POST /api/v1/repositories/sync` → 200 *(auth)*
 

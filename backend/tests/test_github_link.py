@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import GitHubMode, Settings
 from app.db.models.user import User
 from app.services import github_link
 from app.services.auth import register_user
@@ -32,8 +32,10 @@ LINK = "/api/v1/github/link"
 
 @pytest.fixture
 def oauth_settings(settings: Settings) -> Settings:
+    """Live-mode OAuth settings. Mock mode never sends the browser to GitHub."""
     return settings.model_copy(
         update={
+            "github_mode": GitHubMode.LIVE,
             "github_client_id": "Iv1.example",
             "github_client_secret": SecretStr("client-secret"),
             "github_app_slug": "devpilot",
@@ -93,6 +95,17 @@ class TestState:
 
 
 class TestAuthorizeUrl:
+    def test_mock_mode_points_back_at_our_own_callback(
+        self, registered_user: User, settings: Settings
+    ) -> None:
+        """No GitHub to visit in mock mode, so the round trip completes locally
+        -- through the real callback, so the state check is still exercised."""
+        url = github_link.build_authorize_url(registered_user, settings)
+
+        assert url.startswith(settings.github_oauth_redirect_uri)
+        assert f"code={github_link.MOCK_OAUTH_CODE}" in url
+        assert "state=" in url
+
     def test_points_at_github_with_a_state(
         self, registered_user: User, oauth_settings: Settings
     ) -> None:
@@ -110,6 +123,36 @@ class TestAuthorizeUrl:
 
         assert "scope=read%3Auser" in url
         assert "repo" not in url.split("scope=")[1].split("&")[0]
+
+
+class TestAuthorizeEndpoint:
+    def test_returns_the_url_as_json_not_a_redirect(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A redirect would 401 on every real click: the route needs the Bearer
+        token, and a browser navigation cannot carry one."""
+        response = client.get(AUTHORIZE, headers=auth_headers, follow_redirects=False)
+
+        assert response.status_code == 200
+        assert "authorize_url" in response.json()
+        assert "state=" in response.json()["authorize_url"]
+
+    def test_requires_authentication(self, client: TestClient) -> None:
+        assert client.get(AUTHORIZE).status_code == 401
+
+    def test_the_mock_round_trip_links_the_account(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Follow the URL the endpoint hands back, exactly as a browser would."""
+        url = client.get(AUTHORIZE, headers=auth_headers).json()["authorize_url"]
+
+        done = client.get(url, follow_redirects=False)
+
+        assert done.status_code == 307
+        assert "github=linked" in done.headers["location"]
+        status = client.get(STATUS, headers=auth_headers).json()
+        assert status["linked"] is True
+        assert status["github_login"] == "devpilot-demo"
 
 
 class TestStatusEndpoint:
@@ -134,7 +177,7 @@ class TestStatusEndpoint:
 
 class TestCompleteLink:
     def test_attaches_the_github_identity(self, db_session: Session, registered_user: User) -> None:
-        from app.integrations.github.mock import MockGitHubClient
+        from app.integrations.github.mock import MOCK_ACCOUNT, MockGitHubClient
 
         github_link.complete_link(
             db_session, user=registered_user, code="any", client=MockGitHubClient()
@@ -142,7 +185,9 @@ class TestCompleteLink:
         db_session.commit()
 
         assert registered_user.has_linked_github
-        assert registered_user.github_login == "demo-developer"
+        # The mock installation's owner -- so the linked user can then sync it.
+        assert registered_user.github_login == MOCK_ACCOUNT.login
+        assert registered_user.github_id == MOCK_ACCOUNT.id
 
     def test_refuses_an_identity_already_linked_elsewhere(
         self, db_session: Session, registered_user: User

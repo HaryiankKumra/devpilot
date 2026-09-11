@@ -8,6 +8,10 @@ export interface GitHubLinkStatus {
   install_url: string | null;
 }
 
+interface GitHubAuthorizeStart {
+  authorize_url: string;
+}
+
 export function fetchGitHubStatus(): Promise<GitHubLinkStatus> {
   return apiFetch<GitHubLinkStatus>('/api/v1/github/status');
 }
@@ -16,11 +20,21 @@ export function unlinkGitHub(): Promise<unknown> {
   return apiFetch('/api/v1/github/link', { method: 'DELETE' });
 }
 
-/*
- * Note: there is deliberately no helper for starting the OAuth flow from the
- * browser. `/api/v1/github/authorize` requires a Bearer token, and a plain
- * navigation cannot send one — so linking has to be started from a context
- * that can carry the header, or the endpoint has to accept a short-lived
- * one-time link. That is unresolved, and pretending otherwise with a URL that
- * would 401 would be worse than saying so.
+/**
+ * Start linking a GitHub account.
+ *
+ * Two hops rather than one link: `/authorize` needs the Bearer token to know
+ * *which* user is linking, and a plain `<a href>` navigation cannot send one.
+ * So the URL is fetched with the token attached, and only then does the browser
+ * leave for GitHub. The signed `state` inside that URL is what ties the eventual
+ * callback back to this user, so nothing is lost by the extra step.
+ *
+ * In mock mode the URL points back at DevPilot's own callback, so the whole
+ * flow completes locally with no GitHub account involved.
  */
+export async function startGitHubLink(): Promise<void> {
+  const { authorize_url } = await apiFetch<GitHubAuthorizeStart>(
+    '/api/v1/github/authorize',
+  );
+  window.location.assign(authorize_url);
+}

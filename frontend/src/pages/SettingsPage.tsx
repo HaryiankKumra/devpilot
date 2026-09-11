@@ -1,5 +1,9 @@
 import { Button, Card, ErrorState, LoadingState, PageHeader } from '@/components/ui';
-import { fetchGitHubStatus, unlinkGitHub } from '@/features/auth/githubApi';
+import {
+  fetchGitHubStatus,
+  startGitHubLink,
+  unlinkGitHub,
+} from '@/features/auth/githubApi';
 import { useAuth } from '@/features/auth/useAuth';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -12,6 +16,9 @@ export function SettingsPage() {
     mutationFn: unlinkGitHub,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['github', 'status'] }),
   });
+  // Navigates away on success, so there is nothing to invalidate here; the
+  // callback lands the browser back on this page with fresh status.
+  const link = useMutation({ mutationFn: startGitHubLink });
 
   return (
     <>
@@ -59,11 +66,17 @@ export function SettingsPage() {
                 </Button>
               </div>
             ) : (
-              <p className="text-sm text-slate-700">
-                No GitHub account connected. Linking lets DevPilot tell which installation
-                belongs to you.
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm text-slate-700">
+                  No GitHub account connected. Linking lets DevPilot tell which
+                  installation belongs to you.
+                </p>
+                <Button onClick={() => link.mutate()} disabled={link.isPending}>
+                  {link.isPending ? 'Redirecting…' : 'Connect GitHub'}
+                </Button>
+              </div>
             )}
+            {link.isError && <ErrorState message={link.error.message} />}
 
             {status.data.install_url && (
               <p className="mt-3 text-sm">

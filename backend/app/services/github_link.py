@@ -48,8 +48,24 @@ class InvalidOAuthStateError(DevPilotError):
     code = "invalid_oauth_state"
 
 
+MOCK_OAUTH_CODE = "mock-oauth-code"
+
+
 def build_authorize_url(user: User, settings: Settings) -> str:
-    """Return the GitHub URL to send the user to, carrying a signed state."""
+    """Return the URL to send the user to, carrying a signed state.
+
+    In mock mode there is no GitHub to send them to, so the URL points straight
+    back at our own callback with a placeholder code. The callback then runs
+    exactly as it would for real -- state verified, code exchanged through the
+    (mock) client, identity recorded -- which is what lets the full linking flow
+    be driven from a browser with no credentials. Skipping the callback and
+    writing the identity directly would leave the one security-relevant step,
+    the state check, untested in the only place a browser exercises it.
+    """
+    if settings.github_is_mocked:
+        query = urlencode({"code": MOCK_OAUTH_CODE, "state": _encode_state(user, settings)})
+        return f"{settings.github_oauth_redirect_uri}?{query}"
+
     if not settings.github_client_id:
         raise GitHubConfigurationError(
             "GitHub OAuth is not configured. Set DEVPILOT_GITHUB_CLIENT_ID."
