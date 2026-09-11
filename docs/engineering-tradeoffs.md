@@ -2440,3 +2440,26 @@ migration takes. Neither matters at this size.
 not automatically transfer to the next. Entry 85 was known; it still had to be
 rediscovered because the new entrypoint was written without re-reading it.
 
+## 125. Connect timeouts are a property of the deployment, not the code
+
+**Chosen:** `render.yaml` sets the database connect timeout to 15 seconds; the
+code default stays at 3.
+
+**Why:** three seconds is right when PostgreSQL is a container on the same
+Docker network -- it turns "the database is down" into a fast 503 instead of a
+hung request, which is why entry 3 chose it. Against a serverless database it
+is wrong in a way that hides itself: Neon suspends an idle compute and takes a
+few seconds to wake, the first connection times out before the wake completes,
+the compute sees no completed connection and suspends again, and readiness
+reports `OperationalError` on every probe with a latency of exactly the timeout.
+Migrations at startup succeeded, because Alembic sets no timeout, which made
+the failure look like something other than what it was.
+
+Raising the default in code would give the Compose deployment a worse failure
+mode to protect a deployment it is not running. The value belongs beside the
+database it is tuned for.
+
+**Cost:** a readiness probe against a genuinely dead database now takes up to
+15 seconds to say so on Render. The liveness probe, which the platform actually
+watches, touches no dependency and is unaffected.
+

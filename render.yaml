@@ -54,6 +54,16 @@ services:
         value: "true"
       - key: DEVPILOT_ENABLE_HSTS
         value: "true"
+      # Neon is serverless: an idle compute suspends and takes a few seconds to
+      # wake, and it may sit in another region. The 3-second default connect
+      # timeout -- right for a database on the same Docker network -- cut every
+      # connection off mid-handshake, the compute never saw one complete, and
+      # readiness reported OperationalError forever. Migrations worked only
+      # because Alembic sets no timeout. Found on the first live deploy.
+      - key: DEVPILOT_DB_CONNECT_TIMEOUT_SECONDS
+        value: "15"
+      - key: DEVPILOT_DB_POOL_TIMEOUT_SECONDS
+        value: "20"
       - key: DEVPILOT_LLM_MODE
         value: gemini
       - key: DEVPILOT_GITHUB_MODE

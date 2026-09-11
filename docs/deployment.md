@@ -386,7 +386,15 @@ Two free-tier behaviours to know:
   indexing a large repository.
 
 Neon's connection string is plain `postgresql://`; paste it as-is, the
-application rewrites it to the installed driver.
+application rewrites it to the installed driver. Create the Neon project in
+**Singapore** (`ap-southeast-1`) to match the Render region: every query pays
+the round trip, and a database on the other side of the Pacific adds ~200 ms
+to each one.
+
+`render.yaml` raises `DEVPILOT_DB_CONNECT_TIMEOUT_SECONDS` to 15. Neon's compute
+suspends when idle and takes a few seconds to wake; the 3-second default, right
+for a database on the same Docker network, cut every wake-up connection off
+mid-handshake and left readiness reporting `OperationalError` indefinitely.
 
 The Compose deployment above remains the reference. This one is what you run
 when a VM is not an option.
