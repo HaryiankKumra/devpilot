@@ -64,6 +64,18 @@ DEFAULT_MODELS: dict[LLMMode, str] = {
     LLMMode.GEMINI: "gemini-3.6-flash",
 }
 
+# Models to try, in order, when the primary answers 5xx. Free-tier flash models
+# go "high demand, try later" for minutes at a time, and on the first real pull
+# request both 3.6 and 3.7 were overloaded while 3.5 answered in 14 seconds.
+# Retrying the same overloaded model three times with backoff just failed
+# three times; a sibling model is the retry that actually works. Only Gemini
+# has an entry: Anthropic is paid and does not shed load this way.
+DEFAULT_FALLBACK_MODELS: dict[LLMMode, str] = {
+    LLMMode.MOCK: "",
+    LLMMode.ANTHROPIC: "",
+    LLMMode.GEMINI: "gemini-3.5-flash",
+}
+
 
 class EmbeddingMode(StrEnum):
     """How DevPilot produces embeddings.
@@ -173,6 +185,11 @@ class Settings(BaseSettings):
     # Setting it explicitly always wins.
     llm_model: str = ""
 
+    # Comma-separated. Tried in order when the primary model returns a 5xx,
+    # before the attempt is counted as failed. Left unset, follows the provider.
+    # Set to a single comma to opt out entirely.
+    llm_fallback_models: str = ""
+
     # Reviewing code rewards reasoning depth, so this sits at the high end.
     # Typed as a literal so a typo is rejected at startup rather than by the
     # provider on the first review of the day. Anthropic-only; Gemini ignores it.
@@ -219,12 +236,18 @@ class Settings(BaseSettings):
         fails with "model not found" -- which reads like a broken integration
         rather than a one-line configuration mistake.
         """
-        if self.llm_model:
-            return self
-
         # `frozen=True`, so assignment goes through the underlying dict.
-        object.__setattr__(self, "llm_model", DEFAULT_MODELS[self.llm_mode])
+        if not self.llm_model:
+            object.__setattr__(self, "llm_model", DEFAULT_MODELS[self.llm_mode])
+        if not self.llm_fallback_models:
+            object.__setattr__(self, "llm_fallback_models", DEFAULT_FALLBACK_MODELS[self.llm_mode])
         return self
+
+    @property
+    def llm_fallback_model_list(self) -> list[str]:
+        """Fallback models in order, never including the primary itself."""
+        names = [name.strip() for name in self.llm_fallback_models.split(",")]
+        return [name for name in names if name and name != self.llm_model]
 
     # --- Embeddings ----------------------------------------------------------
     # `mock` needs no credentials; see docs/llm-setup.md.

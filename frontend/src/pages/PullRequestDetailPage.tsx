@@ -1,5 +1,6 @@
 import { RiskScore } from '@/components/review/RiskScore';
 import {
+  Button,
   Card,
   CardLink,
   ErrorState,
@@ -9,7 +10,7 @@ import {
   ShortSha,
 } from '@/components/ui';
 import type { JobStatus, ReviewJob } from '@/features/reviews/api';
-import { usePullRequest } from '@/features/reviews/hooks';
+import { usePullRequest, useRetryReview } from '@/features/reviews/hooks';
 import { Link, useParams } from 'react-router-dom';
 
 const JOB_STYLES: Record<JobStatus, string> = {
@@ -25,6 +26,7 @@ export function PullRequestDetailPage() {
   const { data, isPending, isError, error, refetch } = usePullRequest(
     pullRequestId ?? '',
   );
+  const retry = useRetryReview(pullRequestId ?? '');
 
   if (isPending) return <LoadingState label="Loading pull request…" />;
   if (isError)
@@ -72,7 +74,19 @@ export function PullRequestDetailPage() {
         </div>
       )}
 
-      <h2 className="mb-3 mt-8 text-sm font-semibold text-slate-900">Review attempts</h2>
+      <div className="mb-3 mt-8 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold text-slate-900">Review attempts</h2>
+        {/* Only when the latest attempt failed: that is the one state in which
+            the API accepts a retry, and a review can fail for reasons that
+            have nothing to do with the code -- the model provider being
+            down, say. Without this, the only way to try again is to push. */}
+        {latestJobFailed(data.jobs) && (
+          <Button onClick={() => retry.mutate()} disabled={retry.isPending}>
+            {retry.isPending ? 'Queueing…' : 'Retry review'}
+          </Button>
+        )}
+      </div>
+      {retry.isError && <ErrorState message={retry.error.message} />}
       <div className="space-y-2">
         {data.jobs.map((job) => (
           <JobRow key={job.id} job={job} />
@@ -108,4 +122,9 @@ function JobRow({ job }: { job: ReviewJob }) {
       )}
     </Card>
   );
+}
+
+/** Jobs arrive newest first; the retry rule only looks at the latest. */
+function latestJobFailed(jobs: ReviewJob[]): boolean {
+  return jobs[0]?.status === 'failed';
 }

@@ -1,6 +1,6 @@
 # API reference
 
-Twenty endpoints under `/api/v1`, plus two unversioned health probes.
+Twenty-two endpoints under `/api/v1`, plus two unversioned health probes.
 
 The **generated** OpenAPI document is the authoritative contract — it is produced
 from the same Pydantic models the code validates against, so it cannot drift.
@@ -283,6 +283,34 @@ jobs, with their error type and message.
 
 Exposing failures is the point. A reviewer that shows only its successes is one
 you cannot debug and should not trust.
+
+### `POST /api/v1/pull-requests/{id}/retry` → 202 *(auth)*
+
+Queues a fresh review attempt for the same commit. **Only when the latest
+attempt failed** — otherwise `409` with a sentence saying why: an attempt is
+already in progress, the latest one succeeded, or it was superseded by a newer
+commit. `404` for someone else's pull request.
+
+A review can fail for reasons unrelated to the code — the model provider was
+unavailable, say — and without this the only way to try again was to push a
+commit. The failed attempt is kept; a new row is created.
+
+### `POST /api/v1/reviews/{id}/publish` → 200 *(auth)*
+
+Posts (or re-posts) a stored review's findings to its pull request. Returns what
+happened:
+
+```json
+{ "posted": true, "comment_count": 1, "github_review_id": 5179187539,
+  "html_url": "https://github.com/.../pull/3#pullrequestreview-...",
+  "skipped_reason": null }
+```
+
+The post is the last step of the pipeline and can fail on its own — the App
+lacking write access, for instance — without failing the review. This is how a
+stranded review gets sent once the cause is fixed. **Idempotent:** a review
+already on GitHub is left alone and `posted` comes back `false` with a
+`skipped_reason`.
 
 ### `GET /api/v1/findings` → 200 *(auth)*
 

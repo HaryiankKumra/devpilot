@@ -1,5 +1,6 @@
 import { CategoryBadge, RiskScore, SeverityBadge } from '@/components/review/RiskScore';
 import {
+  Button,
   Card,
   ErrorState,
   LoadingState,
@@ -8,12 +9,13 @@ import {
   ShortSha,
 } from '@/components/ui';
 import type { Finding } from '@/features/reviews/api';
-import { useReview } from '@/features/reviews/hooks';
+import { usePublishReview, useReview } from '@/features/reviews/hooks';
 import { Link, useParams } from 'react-router-dom';
 
 export function ReviewDetailPage() {
   const { reviewId } = useParams<{ reviewId: string }>();
   const { data: review, isPending, isError, error, refetch } = useReview(reviewId ?? '');
+  const publish = usePublishReview(reviewId ?? '');
 
   if (isPending) return <LoadingState label="Loading review…" />;
   if (isError)
@@ -59,10 +61,33 @@ export function ReviewDetailPage() {
         <h2 className="text-sm font-semibold text-slate-900">
           {review.findings.length} finding{review.findings.length === 1 ? '' : 's'}
         </h2>
-        <p className="text-xs text-slate-500">
-          {posted} posted to GitHub · {review.findings.length - posted} kept here only
-        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-xs text-slate-500">
+            {posted} posted to GitHub · {review.findings.length - posted} kept here only
+          </p>
+          {/* Only while nothing has reached GitHub yet. The post is the last
+              step of the pipeline and can fail on its own -- the App lacking
+              write access, say -- without failing the review; this is how a
+              stranded review gets sent once the cause is fixed. */}
+          {review.github_review_id === null && review.findings.length > 0 && (
+            <Button
+              variant="secondary"
+              onClick={() => publish.mutate()}
+              disabled={publish.isPending}
+            >
+              {publish.isPending ? 'Posting…' : 'Post to GitHub'}
+            </Button>
+          )}
+        </div>
       </div>
+      {publish.isError && <ErrorState message={publish.error.message} />}
+      {publish.isSuccess && !publish.data.posted && (
+        <Card className="mb-4 p-3">
+          <p className="text-sm text-slate-700">
+            Nothing posted: {publish.data.skipped_reason}
+          </p>
+        </Card>
+      )}
 
       {review.findings.length === 0 ? (
         <Card className="p-8 text-center">

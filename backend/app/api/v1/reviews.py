@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import AppSettings, CurrentUser, DbSession, GitHub
 from app.core.exceptions import NotFoundError
 from app.db.models.finding import Finding
 from app.db.models.pull_request import PullRequest
@@ -26,12 +26,16 @@ from app.db.models.review import Review
 from app.db.models.review_job import ReviewJob
 from app.schemas.review import (
     FindingRead,
+    PublishResponse,
     PullRequestDetail,
     ReviewDetail,
     ReviewJobRead,
     ReviewListItem,
     ReviewSummary,
 )
+from app.services import review_jobs as review_job_service
+from app.services.dispatch import dispatch_review_job
+from app.services.publishing import publish_review
 
 router = APIRouter(tags=["reviews"])
 
@@ -171,6 +175,100 @@ def get_pull_request(
         jobs=[ReviewJobRead.model_validate(job) for job in jobs],
         reviews=[ReviewSummary.model_validate(review) for review in reviews],
     )
+
+
+@router.post(
+    "/reviews/{review_id}/publish",
+    response_model=PublishResponse,
+    summary="Post a stored review to GitHub",
+    responses={404: {"description": "No such review for this user."}},
+)
+def publish_stored_review(
+    review_id: uuid.UUID,
+    user: CurrentUser,
+    session: DbSession,
+    client: GitHub,
+    settings: AppSettings,
+) -> PublishResponse:
+    """Post (or re-post) a review's findings to its pull request.
+
+    A review can exist without ever reaching GitHub: the post is the last and
+    cheapest step of the pipeline, and a failure there deliberately does not
+    fail the job -- the expensive work is done and stored. But then the review
+    is stranded, with nothing except a re-push to try again. Found on the first
+    real pull request, when the App had read-only access and the post got 403.
+
+    Safe to call repeatedly: a review that was already posted is left alone
+    (`reviews.github_review_id` is the post-once marker), and findings already
+    on GitHub are not sent twice.
+
+    Synchronous, unlike the review itself: this is one GitHub call made on a
+    person's click, and they want to know whether it worked.
+    """
+    statement = (
+        select(Review, PullRequest, Repository)
+        .join(PullRequest, Review.pull_request_id == PullRequest.id)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(Review.id == review_id, Repository.owner_id == user.id)
+    )
+    row = session.execute(statement).first()
+    if row is None:
+        raise NotFoundError("Review not found.")
+    review, pull_request, repository = row
+
+    result = publish_review(
+        session,
+        review=review,
+        pull_request=pull_request,
+        repository=repository,
+        client=client,
+        settings=settings,
+    )
+    session.commit()
+
+    return PublishResponse(
+        posted=result.posted,
+        comment_count=result.comment_count,
+        github_review_id=result.github_review_id,
+        html_url=result.html_url,
+        skipped_reason=result.skipped_reason,
+    )
+
+
+@router.post(
+    "/pull-requests/{pull_request_id}/retry",
+    response_model=ReviewJobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue a fresh review after a failed attempt",
+    responses={
+        404: {"description": "No such pull request for this user."},
+        409: {"description": "The latest attempt did not fail, so there is nothing to retry."},
+    },
+)
+def retry_review(
+    pull_request_id: uuid.UUID, user: CurrentUser, session: DbSession
+) -> ReviewJobRead:
+    """Start a new attempt for a pull request whose last review failed.
+
+    A review can fail for reasons unrelated to the code -- the model provider
+    was unavailable, say -- and without this the only way to try again is to
+    push a commit. 202 rather than 200: the work happens on a worker, and the
+    row returned is the attempt to watch, not a result.
+    """
+    job = review_job_service.retry_failed_review(
+        session, owner=user, pull_request_id=pull_request_id
+    )
+    session.commit()
+
+    # Dispatch only after the commit, for the same reason the webhook does:
+    # Redis and PostgreSQL share no transaction, and a worker that receives the
+    # task first would look for a row that is not there yet.
+    celery_task_id = dispatch_review_job(job.id)
+    if celery_task_id is not None:
+        job.celery_task_id = celery_task_id
+        session.commit()
+
+    return ReviewJobRead.model_validate(job)
 
 
 @router.get(

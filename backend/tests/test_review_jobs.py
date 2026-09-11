@@ -198,3 +198,133 @@ class TestAttemptBudget:
             assert job.can_retry is expected
             job.attempts += 1
             db_session.flush()
+
+
+class TestRetryFailedReview:
+    """Queueing a fresh attempt after a failure.
+
+    Found necessary on the first real pull request: the model provider returned
+    503 three times in two minutes, the job was marked failed, and the only
+    other way to get a review was to push a commit.
+    """
+
+    @staticmethod
+    def _fail(db_session: Session, job: ReviewJob) -> None:
+        job.status = ReviewJobStatus.FAILED
+        job.error_type = "LLMTransientError"
+        db_session.commit()
+
+    def test_queues_a_new_job_for_the_same_commit(
+        self, db_session: Session, registered_user: User, job: ReviewJob
+    ) -> None:
+        self._fail(db_session, job)
+
+        fresh = review_jobs.retry_failed_review(
+            db_session, owner=registered_user, pull_request_id=job.pull_request_id
+        )
+        db_session.commit()
+
+        assert fresh.id != job.id
+        assert fresh.status is ReviewJobStatus.QUEUED
+        assert fresh.head_sha == job.head_sha
+        assert fresh.webhook_event_id is None
+
+    def test_keeps_the_failed_attempt_as_history(
+        self, db_session: Session, registered_user: User, job: ReviewJob
+    ) -> None:
+        """Overwriting the failed row would erase exactly what the pull request
+        page exists to show."""
+        self._fail(db_session, job)
+
+        review_jobs.retry_failed_review(
+            db_session, owner=registered_user, pull_request_id=job.pull_request_id
+        )
+        db_session.commit()
+        db_session.refresh(job)
+
+        assert job.status is ReviewJobStatus.FAILED
+        assert job.error_type == "LLMTransientError"
+
+    @pytest.mark.parametrize(
+        ("state", "reason"),
+        [
+            (ReviewJobStatus.QUEUED, "already in progress"),
+            (ReviewJobStatus.RUNNING, "already in progress"),
+            (ReviewJobStatus.SUCCEEDED, "nothing to retry"),
+            (ReviewJobStatus.CANCELLED, "superseded"),
+        ],
+    )
+    def test_refuses_unless_the_latest_attempt_failed(
+        self,
+        db_session: Session,
+        registered_user: User,
+        job: ReviewJob,
+        state: ReviewJobStatus,
+        reason: str,
+    ) -> None:
+        from app.core.exceptions import ConflictError
+
+        job.status = state
+        db_session.commit()
+
+        with pytest.raises(ConflictError, match=reason):
+            review_jobs.retry_failed_review(
+                db_session, owner=registered_user, pull_request_id=job.pull_request_id
+            )
+
+    def test_only_the_latest_attempt_counts(
+        self, db_session: Session, registered_user: User, job: ReviewJob
+    ) -> None:
+        """An old failure under a later success must not be retryable: that
+        would post a second review."""
+        from datetime import UTC, datetime, timedelta
+
+        from app.core.exceptions import ConflictError
+
+        self._fail(db_session, job)
+        later = ReviewJob(
+            pull_request_id=job.pull_request_id,
+            head_sha=job.head_sha,
+            status=ReviewJobStatus.SUCCEEDED,
+            # Explicit, because two rows created back to back can share a
+            # timestamp on a coarse clock, and "latest" must not be a coin toss.
+            created_at=datetime.now(UTC) + timedelta(seconds=5),
+        )
+        db_session.add(later)
+        db_session.commit()
+
+        with pytest.raises(ConflictError, match="nothing to retry"):
+            review_jobs.retry_failed_review(
+                db_session, owner=registered_user, pull_request_id=job.pull_request_id
+            )
+
+    def test_someone_elses_pull_request_is_not_found(
+        self, db_session: Session, job: ReviewJob
+    ) -> None:
+        """404, not 403: confirming it exists is itself information."""
+        from app.core.exceptions import NotFoundError
+        from app.services.auth import register_user
+
+        self._fail(db_session, job)
+        stranger = register_user(
+            db_session,
+            email="stranger@example.com",
+            password="a-different-password",
+            full_name=None,
+        )
+        db_session.commit()
+
+        with pytest.raises(NotFoundError):
+            review_jobs.retry_failed_review(
+                db_session, owner=stranger, pull_request_id=job.pull_request_id
+            )
+
+    def test_an_unknown_pull_request_is_not_found(
+        self, db_session: Session, registered_user: User
+    ) -> None:
+        from app.core.exceptions import NotFoundError
+
+        with pytest.raises(NotFoundError):
+            review_jobs.retry_failed_review(
+                db_session, owner=registered_user, pull_request_id=uuid.uuid4()
+            )

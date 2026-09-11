@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app.core.enums import ReviewJobStatus
 from app.core.logging import get_logger
 from app.db.models.review_job import ReviewJob
+from app.db.models.user import User
 
 logger = get_logger(__name__)
 
@@ -167,3 +168,77 @@ def _duration_seconds(job: ReviewJob) -> float | None:
 
 def _format_traceback(error: BaseException) -> str:
     return "".join(traceback.format_exception(type(error), error, error.__traceback__))
+
+
+def retry_failed_review(session: Session, *, owner: User, pull_request_id: uuid.UUID) -> ReviewJob:
+    """Queue a fresh attempt for a pull request whose last attempt failed.
+
+    Exists because a review can fail for reasons that have nothing to do with
+    the code -- the model provider returning 503 three times in two minutes,
+    say -- and the only other way to get another attempt is to push a commit.
+    Asking the author to change their pull request to work around our provider
+    is the wrong way round.
+
+    A *new* job rather than a reset of the failed one: the failed row is the
+    record of what went wrong and when, and overwriting it would erase exactly
+    the history the pull request page exists to show.
+
+    Only the latest attempt matters, and only if it failed:
+
+    * queued or running -- an attempt is already in flight; a second would race
+      it for the same commit.
+    * succeeded -- there is a review already; a second would post twice.
+    * cancelled -- superseded by a newer commit; that commit has its own job.
+    """
+    from sqlalchemy import select
+
+    from app.core.exceptions import ConflictError, NotFoundError
+    from app.db.models.pull_request import PullRequest
+    from app.db.models.repository import Repository
+    from app.db.repositories.review_job import ReviewJobStore
+
+    owned = (
+        select(PullRequest)
+        .join(Repository, PullRequest.repository_id == Repository.id)
+        .where(PullRequest.id == pull_request_id, Repository.owner_id == owner.id)
+    )
+    pull_request = session.execute(owned).scalar_one_or_none()
+    if pull_request is None:
+        # 404 for someone else's pull request: confirming it exists is itself
+        # information the caller has not earned.
+        raise NotFoundError("Pull request not found.")
+
+    store = ReviewJobStore(session)
+    attempts = store.list_for_pull_request(pull_request.id)
+    # Normalised, because SQLite hands back the server-default timestamp naive
+    # and an explicitly set one aware, and Python refuses to compare the two.
+    latest = max(attempts, key=lambda job: _as_utc(job.created_at), default=None)
+
+    if latest is None:
+        raise ConflictError("This pull request has never been reviewed; nothing to retry.")
+    if latest.status in (ReviewJobStatus.QUEUED, ReviewJobStatus.RUNNING):
+        raise ConflictError("A review is already in progress for this pull request.")
+    if latest.status is ReviewJobStatus.SUCCEEDED:
+        raise ConflictError("The latest review succeeded; there is nothing to retry.")
+    if latest.status is ReviewJobStatus.CANCELLED:
+        raise ConflictError(
+            "That attempt was superseded by a newer commit, which has its own review."
+        )
+
+    job = store.add(
+        ReviewJob(
+            pull_request_id=pull_request.id,
+            # No webhook triggered this; a person did.
+            webhook_event_id=None,
+            head_sha=latest.head_sha,
+            status=ReviewJobStatus.QUEUED,
+        )
+    )
+    logger.info(
+        "review_job.retry_requested",
+        review_job_id=str(job.id),
+        pull_request_id=str(pull_request.id),
+        previous_job_id=str(latest.id),
+        previous_error=latest.error_type,
+    )
+    return job

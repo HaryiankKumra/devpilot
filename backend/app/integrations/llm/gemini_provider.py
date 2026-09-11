@@ -147,7 +147,17 @@ class GeminiReviewProvider:
         return self._settings.llm_model
 
     def review(self, *, system_prompt: str, user_prompt: str) -> LLMReviewResponse:
-        """Ask for a review and return it validated, or raise an `LLMError`."""
+        """Ask for a review and return it validated, or raise an `LLMError`.
+
+        Tries the primary model, then each fallback in turn -- but only when the
+        failure is a server-side 5xx. On the free tier a flash model can answer
+        "high demand, try again later" for minutes at a stretch, and retrying
+        that same model with backoff just fails on schedule; a sibling model is
+        the retry that actually works. Every other failure is raised at once:
+        a rate limit is per key and handled by the pool, a refusal or a bad
+        response would recur on any model, and a rejected key is not a model
+        problem at all.
+        """
         try:
             leased = self._pool.acquire()
         except NoKeysAvailableError as exc:
@@ -156,10 +166,53 @@ class GeminiReviewProvider:
             raise LLMRateLimitError(str(exc), retry_after_seconds=exc.retry_after_seconds) from exc
 
         client = self._client_for(leased)
+        candidates = [self._settings.llm_model, *self._settings.llm_fallback_model_list]
+        last_error: LLMTransientError | None = None
 
+        for index, model in enumerate(candidates):
+            try:
+                response = self._generate(client, leased, model, system_prompt, user_prompt)
+            except LLMRateLimitError:
+                # A subclass of LLMTransientError, so it must be caught first.
+                # It is per key, not per model, and the pool has already parked
+                # the key; switching model would spend the next key on the same
+                # problem.
+                raise
+            except LLMTransientError as exc:
+                last_error = exc
+                remaining = candidates[index + 1 :]
+                if remaining:
+                    logger.warning(
+                        "llm.model_fallback",
+                        provider="gemini",
+                        failed_model=model,
+                        next_model=remaining[0],
+                        error=str(exc)[:160],
+                    )
+                continue
+
+            if index > 0:
+                # Recorded on the review row as the model that answered, so a
+                # fallback is visible in the data rather than silently blended
+                # into the primary model's results.
+                logger.info("llm.model_fallback_succeeded", provider="gemini", model=model)
+            return self._to_response(response, model=model)
+
+        assert last_error is not None  # every candidate raised, so one was caught
+        raise last_error
+
+    def _generate(
+        self,
+        client: Any,
+        leased: LeasedKey,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> Any:
+        """One request to one model, with failures mapped onto `LLMError`s."""
         try:
-            response = client.models.generate_content(
-                model=self._settings.llm_model,
+            return client.models.generate_content(
+                model=model,
                 contents=user_prompt,
                 config=genai_types.GenerateContentConfig(
                     # The schema rides in the prompt rather than in
@@ -185,8 +238,6 @@ class GeminiReviewProvider:
             # Connection-level problems surface here rather than as a status.
             raise LLMTransientError(f"Could not reach Gemini: {exc}") from exc
 
-        return self._to_response(response)
-
     def _handle_client_error(self, exc: genai_errors.ClientError, leased: LeasedKey) -> None:
         """Map a 4xx onto this project's exception vocabulary. Always raises."""
         status = getattr(exc, "code", None)
@@ -209,7 +260,7 @@ class GeminiReviewProvider:
         # unchanged fails identically, so this is permanent, not transient.
         raise LLMInvalidResponseError(f"Gemini rejected the request: {exc}") from exc
 
-    def _to_response(self, response: Any) -> LLMReviewResponse:
+    def _to_response(self, response: Any, *, model: str) -> LLMReviewResponse:
         """Turn a Gemini response into a validated review."""
         self._reject_if_declined(response)
 
@@ -219,14 +270,14 @@ class GeminiReviewProvider:
         # when it cannot instantiate the model, and a review that skipped
         # validation is exactly what this project refuses to build on.
         if isinstance(parsed, LLMReview):
-            return self._wrap(parsed, response)
+            return self._wrap(parsed, response, model=model)
 
         if isinstance(parsed, dict):
-            return self._wrap(self._validate(parsed), response)
+            return self._wrap(self._validate(parsed), response, model=model)
 
         text = getattr(response, "text", None)
         if text:
-            return self._wrap(self._validate_json(text), response)
+            return self._wrap(self._validate_json(text), response, model=model)
 
         raise LLMInvalidResponseError("Gemini returned no parseable review content.")
 
@@ -293,11 +344,11 @@ class GeminiReviewProvider:
                 f"First 200 characters: {text[:200]!r}"
             ) from first_error
 
-    def _wrap(self, review: LLMReview, response: Any) -> LLMReviewResponse:
+    def _wrap(self, review: LLMReview, response: Any, *, model: str) -> LLMReviewResponse:
         usage = getattr(response, "usage_metadata", None)
         return LLMReviewResponse(
             review=review,
-            model_name=self.model_name,
+            model_name=model,
             usage=LLMUsage(
                 prompt_tokens=getattr(usage, "prompt_token_count", None),
                 completion_tokens=getattr(usage, "candidates_token_count", None),

@@ -1210,7 +1210,9 @@ review is genuinely complete; only its delivery failed, and the dashboard shows
 it either way.
 
 **Cost:** a review can exist that the pull request never sees. It is visible in
-the UI and in the job's error field, and re-posting is cheap.
+the UI and in the job's error field, and `POST /reviews/{id}/publish` sends it
+once the cause is fixed. *(That endpoint did not exist when this entry was
+first written -- see entry 114 for how that was discovered.)*
 
 ## 71. Reviews are posted as COMMENT, never REQUEST_CHANGES
 
@@ -2121,3 +2123,92 @@ server did not.
 **Cost:** polling costs CPU proportional to the file count, which is why it is
 opt-in rather than always on. A native Linux checkout, where events work, is not
 made to pay for it.
+
+## 112. A failed review can be retried without pushing a commit
+
+**Chosen:** `POST /pull-requests/{id}/retry` queues a fresh attempt when the
+latest one failed, and the pull request page offers it as a button.
+
+**Why:** the first real pull request through the system had its review fail
+three times in two minutes because the model provider answered 503, and there
+was then no way to try again except pushing another commit. Asking an author to
+change their pull request to work around *our* provider being down is the wrong
+way round.
+
+A *new* job rather than a reset of the failed one: the failed row is the record
+of what went wrong and when, and overwriting it would erase exactly the history
+the pull request page exists to show.
+
+The rule is deliberately narrow -- only when the **latest** attempt failed. A
+queued or running one would be raced for the same commit; a succeeded one has a
+review already, and a second would post twice; a cancelled one was superseded
+by a newer commit that has its own job. Each is a `409` with a sentence saying
+which.
+
+**Cost:** one more way a job can be created, with no webhook behind it. The row
+records that (`webhook_event_id` is null), so the audit trail still says who
+started it.
+
+**Found by:** the retry test for "only the latest attempt counts", which failed
+because `created_at` is a *server default*. In SQLite that is second-granular
+and hands back naive datetimes; in PostgreSQL `now()` is fixed for the whole
+transaction, so two jobs created together tie exactly. The service now
+normalises timezones before comparing, and the test sets an explicit timestamp
+rather than racing a coarse clock.
+
+## 113. One overloaded model falls back to a sibling
+
+**Chosen:** on a 5xx from the primary Gemini model, the provider tries each
+model in `DEVPILOT_LLM_FALLBACK_MODELS` in turn before counting the attempt as
+failed. The default fallback is `gemini-3.5-flash`.
+
+**Why:** retries with backoff assume the failure is *transient in time*. A
+free-tier flash model answering "high demand, try again later" can stay that
+way for many minutes, and on the first real pull request `gemini-3.6-flash` and
+`gemini-3.7-flash` were both overloaded while `gemini-3.5-flash` answered in
+fourteen seconds. Six attempts with backoff failed on schedule; the sibling
+model was the retry that actually worked.
+
+Strictly for server-side failures. A rate limit is per key, not per model, and
+the key pool has already parked the key -- switching model would just spend the
+next key's quota on the same problem. A refusal or a malformed response would
+recur on any model. A rejected key is not a model problem at all. The test suite
+caught the first implementation catching rate limits too, because
+`LLMRateLimitError` subclasses `LLMTransientError`; that is the kind of
+inheritance detail worth a test.
+
+The model that actually answered is recorded on the review, not the one that
+was asked. A fallback is visible in the data rather than blended into the
+primary model's results, so "did reviews get worse after the upgrade?" stays
+answerable.
+
+**Cost:** a review can be produced by a model other than the configured one,
+which is the point but also a thing to know. The log says when it happens.
+
+## 114. A stored review can be posted after the fact
+
+**Chosen:** `POST /reviews/{id}/publish` runs the publishing step for an
+existing review, and the review page offers it while nothing has reached
+GitHub yet.
+
+**Why:** entry 70 decided that a failed post must not fail the review -- the
+expensive work is done and stored -- and claimed that re-posting was a cheap
+manual action. It was not; no such action existed. The first real pull request
+found this: the App had read-only access to pull requests, the post got 403,
+the review sat in the database with a correct, specific finding, and once the
+permission was granted there was no way to send it. The retry endpoint
+correctly refused, because the job had *succeeded*.
+
+Idempotent, because a button can be clicked twice: a review already on GitHub is
+left alone (`reviews.github_review_id` is the post-once marker, entry 68) and
+findings already posted are not sent again. Synchronous, unlike the review
+itself: this is one GitHub call on a person's click, and they want to know
+whether it worked.
+
+**Cost:** a network call inside a request handler, which the rest of the API
+avoids. It is a single call of about a second, and the alternative -- queue it
+and make the user poll -- is worse for exactly the person pressing the button.
+
+**How it was found:** by claiming, in a message, that a retry would "just
+repost" the stored review, and being told `409` by code I had written an hour
+earlier. The code was right.

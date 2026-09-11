@@ -83,11 +83,16 @@ class _Models:
 
     def generate_content(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        if callable(self._outcome):
-            return self._outcome(**kwargs)
-        return self._outcome
+        outcome = self._outcome
+        # A dict keyed by model name lets one fake answer differently per model,
+        # which is what the fallback tests need.
+        if isinstance(outcome, dict):
+            outcome = outcome[kwargs["model"]]
+        if isinstance(outcome, Exception):
+            raise outcome
+        if callable(outcome):
+            return outcome(**kwargs)
+        return outcome
 
 
 class _Client:
@@ -100,8 +105,13 @@ def build_provider(
     outcome: Any,
     *,
     keys: list[str] | None = None,
+    fallback_models: str = ",",
 ) -> tuple[GeminiReviewProvider, list[_Client]]:
-    """A provider wired to a fake client, plus the clients it built."""
+    """A provider wired to a fake client, plus the clients it built.
+
+    Fallbacks default to *off* (a lone comma), so the many tests about a single
+    model's failure modes are not silently rescued by a second model.
+    """
     built: list[_Client] = []
 
     def factory(api_key: str) -> _Client:
@@ -109,7 +119,12 @@ def build_provider(
         built.append(client)
         return client
 
-    settings = Settings(_env_file=None, environment=Environment.CI, llm_mode=LLMMode.GEMINI)
+    settings = Settings(
+        _env_file=None,
+        environment=Environment.CI,
+        llm_mode=LLMMode.GEMINI,
+        llm_fallback_models=fallback_models,
+    )
     provider = GeminiReviewProvider(
         settings,
         pool=ApiKeyPool(keys or ["key-one"]),
@@ -334,6 +349,119 @@ class TestErrorMapping:
             run(provider)
         with pytest.raises(LLMRateLimitError, match="rate-limited"):
             run(provider)
+
+
+def server_error(code: int = 503) -> genai_errors.ServerError:
+    error = genai_errors.ServerError.__new__(genai_errors.ServerError)
+    Exception.__init__(error, f"HTTP {code}: high demand")
+    error.code = code
+    return error
+
+
+class TestModelFallback:
+    """A sibling model is the retry that works when one is overloaded.
+
+    Observed on the first real pull request: gemini-3.6-flash and 3.7-flash
+    both answered 503 "high demand" for minutes, six attempts with backoff all
+    failed on schedule, and 3.5-flash answered in fourteen seconds.
+    """
+
+    PRIMARY = "gemini-3.6-flash"
+
+    def test_falls_back_when_the_primary_returns_5xx(self) -> None:
+        provider, clients = build_provider(
+            {self.PRIMARY: server_error(503), "gemini-3.5-flash": _Response(parsed=VALID_REVIEW)},
+            fallback_models="gemini-3.5-flash",
+        )
+
+        result = run(provider)
+
+        assert [c["model"] for c in clients[0].models.calls] == [self.PRIMARY, "gemini-3.5-flash"]
+        assert result.review.summary.startswith("Adds a login handler")
+
+    def test_records_the_model_that_actually_answered(self) -> None:
+        """So a fallback is visible in the data, not blended into the primary
+        model's results -- "did reviews get worse?" depends on knowing."""
+        provider, _ = build_provider(
+            {self.PRIMARY: server_error(503), "gemini-3.5-flash": _Response(parsed=VALID_REVIEW)},
+            fallback_models="gemini-3.5-flash",
+        )
+
+        assert run(provider).model_name == "gemini-3.5-flash"
+
+    def test_does_not_fall_back_when_the_primary_succeeds(self) -> None:
+        provider, clients = build_provider(
+            _Response(parsed=VALID_REVIEW), fallback_models="gemini-3.5-flash"
+        )
+
+        result = run(provider)
+
+        assert [c["model"] for c in clients[0].models.calls] == [self.PRIMARY]
+        assert result.model_name == self.PRIMARY
+
+    def test_tries_fallbacks_in_order_and_stops_at_the_first_success(self) -> None:
+        provider, clients = build_provider(
+            {
+                self.PRIMARY: server_error(503),
+                "gemini-3.7-flash": server_error(503),
+                "gemini-3.5-flash": _Response(parsed=VALID_REVIEW),
+            },
+            fallback_models="gemini-3.7-flash,gemini-3.5-flash",
+        )
+
+        result = run(provider)
+
+        assert [c["model"] for c in clients[0].models.calls] == [
+            self.PRIMARY,
+            "gemini-3.7-flash",
+            "gemini-3.5-flash",
+        ]
+        assert result.model_name == "gemini-3.5-flash"
+
+    def test_raises_the_last_error_when_every_model_fails(self) -> None:
+        provider, _ = build_provider(
+            {self.PRIMARY: server_error(503), "gemini-3.5-flash": server_error(502)},
+            fallback_models="gemini-3.5-flash",
+        )
+
+        with pytest.raises(LLMTransientError, match="502"):
+            run(provider)
+
+    def test_does_not_fall_back_on_a_rate_limit(self) -> None:
+        """A 429 is per key, not per model, and the pool handles it. Switching
+        model would just spend the next key's quota on the same problem."""
+        provider, clients = build_provider(
+            {self.PRIMARY: client_error(429), "gemini-3.5-flash": _Response(parsed=VALID_REVIEW)},
+            fallback_models="gemini-3.5-flash",
+        )
+
+        with pytest.raises(LLMRateLimitError):
+            run(provider)
+        assert [c["model"] for c in clients[0].models.calls] == [self.PRIMARY]
+
+    def test_does_not_fall_back_on_a_refusal(self) -> None:
+        """An identical refused prompt is refused by the next model too."""
+        provider, clients = build_provider(
+            {
+                self.PRIMARY: _Response(parsed=None, block_reason="SAFETY"),
+                "gemini-3.5-flash": _Response(parsed=VALID_REVIEW),
+            },
+            fallback_models="gemini-3.5-flash",
+        )
+
+        with pytest.raises(LLMRefusalError):
+            run(provider)
+        assert len(clients[0].models.calls) == 1
+
+    def test_does_not_fall_back_on_a_rejected_key(self) -> None:
+        provider, clients = build_provider(
+            {self.PRIMARY: client_error(401), "gemini-3.5-flash": _Response(parsed=VALID_REVIEW)},
+            fallback_models="gemini-3.5-flash",
+        )
+
+        with pytest.raises(LLMAuthenticationError):
+            run(provider)
+        assert len(clients[0].models.calls) == 1
 
 
 class TestKeyRotation:

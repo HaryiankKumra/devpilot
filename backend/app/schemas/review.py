@@ -107,3 +107,16 @@ class PullRequestDetail(BaseModel):
 
     jobs: list[ReviewJobRead] = Field(default_factory=list)
     reviews: list[ReviewSummary] = Field(default_factory=list)
+
+
+class PublishResponse(BaseModel):
+    """What happened when a stored review was (re)posted to GitHub."""
+
+    posted: bool
+    comment_count: int
+    github_review_id: int | None
+    html_url: str | None
+    # Why nothing was posted, when nothing was. Never a secret; it names a
+    # condition ("already posted", "no findings above the threshold"), not a
+    # credential.
+    skipped_reason: str | None

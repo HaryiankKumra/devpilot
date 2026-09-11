@@ -160,3 +160,36 @@ export function indexRepository(repositoryId: string): Promise<IndexResult> {
     method: 'POST',
   });
 }
+
+/**
+ * Queue a fresh review after a failed attempt.
+ *
+ * Only allowed when the latest attempt failed; the API answers 409 otherwise,
+ * and the button that calls this is only rendered in that state.
+ */
+export function retryReview(pullRequestId: string): Promise<ReviewJob> {
+  return apiFetch<ReviewJob>(`/api/v1/pull-requests/${pullRequestId}/retry`, {
+    method: 'POST',
+  });
+}
+
+export interface PublishResult {
+  posted: boolean;
+  comment_count: number;
+  github_review_id: number | null;
+  html_url: string | null;
+  skipped_reason: string | null;
+}
+
+/**
+ * Post (or re-post) a stored review to its pull request.
+ *
+ * A review can exist without ever reaching GitHub -- the post is the last
+ * step, and a failure there does not fail the review. Idempotent: a review
+ * already on GitHub is left alone.
+ */
+export function publishReview(reviewId: string): Promise<PublishResult> {
+  return apiFetch<PublishResult>(`/api/v1/reviews/${reviewId}/publish`, {
+    method: 'POST',
+  });
+}

@@ -15,6 +15,8 @@ import {
   fetchReview,
   fetchReviews,
   indexRepository,
+  publishReview,
+  retryReview,
   syncRepositories,
 } from '@/features/reviews/api';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -93,5 +95,27 @@ export function useIndexRepository() {
     // resolves. Invalidating still refreshes the list on the next poll or
     // navigation, which is when the user would notice.
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.repositories }),
+  });
+}
+
+export function useRetryReview(pullRequestId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () => retryReview(pullRequestId),
+    // The new attempt appears in the job list immediately as `queued`; its
+    // outcome lands on the next refetch, once the worker has run.
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.pullRequest(pullRequestId) }),
+  });
+}
+
+export function usePublishReview(reviewId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () => publishReview(reviewId),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.review(reviewId) }),
   });
 }
