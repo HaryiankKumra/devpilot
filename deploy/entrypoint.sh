@@ -17,8 +17,12 @@ PORT="${PORT:-10000}"
 # children -- fit comfortably; the prefork default would not.
 UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
 
-echo "==> applying migrations"
-alembic upgrade head
+# Under an advisory lock, not bare `alembic upgrade head`: the platform may
+# start two instances of a new deploy at once, and two concurrent migrations
+# against one database means the loser dies on "relation already exists". The
+# Compose stack avoids this with a one-shot migrate service; here the lock is
+# the equivalent. Seen on the very first Render deploy.
+python scripts/migrate.py
 
 echo "==> starting worker"
 celery -A app.worker.celery_app:celery_app worker \

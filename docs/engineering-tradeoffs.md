@@ -2413,3 +2413,30 @@ one-line rewrite means the string works as copied.
 **Cost:** a URL that genuinely meant psycopg2 would be silently redirected.
 Nothing here can mean that, because psycopg2 is not a dependency.
 
+## 124. Startup migrations run under an advisory lock
+
+**Chosen:** the single-container entrypoint runs migrations through
+`scripts/migrate.py`, which takes a PostgreSQL advisory lock for the duration
+of `alembic upgrade head`.
+
+**Why:** entry 85 chose a one-shot migration job for the Compose stack precisely
+because migrating on API startup races when more than one instance starts. The
+single-container image then migrated on startup anyway -- it has no separate
+job to run -- and the first Render deploy proved entry 85 right: the platform
+started two instances of the new image at once, both ran the migration, and
+the loser died on `relation "users" already exists`. The log showed
+`applying migrations` twice, which is the whole diagnosis in three words.
+
+An advisory lock is the smallest fix that keeps startup migrations. The second
+instance blocks until the first releases the lock, then runs Alembic itself and
+finds nothing to do. Verified by racing two migrations against a fresh
+database: both exited 0, seven migrations ran once, one consistent schema.
+
+**Cost:** a second database connection held open for the duration of the
+migration, and a startup that is slower by however long the *other* instance's
+migration takes. Neither matters at this size.
+
+**The lesson worth keeping:** a tradeoff recorded for one deployment shape does
+not automatically transfer to the next. Entry 85 was known; it still had to be
+rediscovered because the new entrypoint was written without re-reading it.
+
