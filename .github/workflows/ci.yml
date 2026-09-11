@@ -226,3 +226,14 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The single-container image (Render and any Docker PaaS). It has its own
+      # frontend stage and entrypoint, so neither build above covers it.
+      - name: Build the single-container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -2,8 +2,8 @@
 # DevPilot on Render's free tier -- no card required.
 #
 # One web service runs the API, the Celery worker and the static frontend from
-# a single container (deploy/single/Dockerfile). Redis is Render's free Key
-# Value instance. PostgreSQL is *not* Render's: the free database is deleted
+# a single container (the Dockerfile at the repository root). Redis is Render's
+# free Key Value instance. PostgreSQL is *not* Render's: the free database is deleted
 # after 30 days, so it lives on Neon (free, permanent, pgvector included) and
 # arrives here as DEVPILOT_DATABASE_URL.
 #
@@ -27,7 +27,7 @@ services:
     runtime: docker
     plan: free
     region: singapore
-    dockerfilePath: ./deploy/single/Dockerfile
+    dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
     # Render's free tier does not restart on a non-zero exit; the entrypoint

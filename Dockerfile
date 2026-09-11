@@ -8,9 +8,12 @@
 # frontend run in a single container; PostgreSQL and Redis are external
 # (Neon and Render Key Value on the free path).
 #
-# Build from the repository root:
+# It lives at the repository root because that is where every Docker PaaS looks
+# by default -- Render, Railway, Koyeb, Fly -- and a service created by hand in
+# any of their dashboards fails with "no such file: Dockerfile" otherwise. The
+# Compose stacks use backend/Dockerfile and frontend/Dockerfile instead.
 #
-#   docker build -f deploy/single/Dockerfile -t devpilot .
+#   docker build -t devpilot .
 #
 # This is a deliberate compromise and the Compose files remain the reference
 # deployment. Two processes in one container means one restart unit, one set
@@ -67,7 +70,7 @@ COPY --chown=devpilot:devpilot backend/alembic.ini ./alembic.ini
 COPY --chown=devpilot:devpilot backend/alembic ./alembic
 COPY --chown=devpilot:devpilot backend/scripts ./scripts
 COPY --from=frontend --chown=devpilot:devpilot /build/dist ./static
-COPY --chown=devpilot:devpilot deploy/single/entrypoint.sh ./entrypoint.sh
+COPY --chown=devpilot:devpilot deploy/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
 USER devpilot

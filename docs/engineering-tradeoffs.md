@@ -2367,7 +2367,7 @@ runs; supporting more would be speculative.
 
 ## 122. A single-container image for hosts that give you one service
 
-**Chosen:** `deploy/single/Dockerfile` builds the frontend, installs the API,
+**Chosen:** the root `Dockerfile` builds the frontend, installs the API,
 and runs uvicorn and a solo-pool Celery worker side by side under one
 entrypoint. The API serves the static bundle itself. `render.yaml` describes the
 deployment.

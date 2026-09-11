@@ -369,7 +369,7 @@ there is a second target that costs nothing and asks for no card anywhere:
 | HTTPS | `https://<name>.onrender.com` | Provided; webhooks work |
 
 The trade is that one free service means **one container**, so
-`deploy/single/Dockerfile` runs the API, the Celery worker and the built
+the root `Dockerfile` runs the API, the Celery worker and the built
 frontend together. The API serves the bundle itself (see `app/api/spa.py`),
 and the entrypoint exits if *either* process dies so a dead worker cannot hide
 behind a healthy API. [`render.yaml`](../render.yaml) describes both services;
