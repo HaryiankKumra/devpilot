@@ -3,25 +3,36 @@
 How to run DevPilot somewhere other than a laptop, and what to check before you
 do.
 
-This describes a **single-host Docker Compose deployment** behind a reverse proxy
-that terminates TLS. That is the right size for this project: one machine, one
+This describes a **single-host Docker Compose deployment** with TLS terminated
+inside the stack. That is the right size for this project: one machine, one
 `docker compose up`, and no orchestrator to learn. The section at the end says
 what would have to change to run it larger.
+
+There is a [step-by-step walkthrough for Oracle Cloud's Always Free
+tier](#walkthrough-oracle-cloud-always-free) further down: a real VM that costs
+nothing, which is where this project actually runs.
 
 ---
 
 ## What runs
 
-Six containers, defined in [`docker-compose.prod.yml`](../docker-compose.prod.yml):
+Seven containers, defined in [`docker-compose.prod.yml`](../docker-compose.prod.yml):
 
 | Service | Image | Role |
 |---|---|---|
+| `caddy` | `caddy:2-alpine` | **The only published ports.** TLS, automatic Let's Encrypt, routing |
 | `postgres` | `pgvector/pgvector:pg16` | Database and vector store |
 | `redis` | `redis:7-alpine` | Celery broker, result backend, rate-limit counters |
 | `migrate` | `devpilot-api` | One-shot `alembic upgrade head`, must exit 0 |
 | `api` | `devpilot-api` | Uvicorn, 4 workers |
 | `worker` | `devpilot-api` | Celery, concurrency 4 |
 | `frontend` | `devpilot-frontend` | nginx serving the built bundle |
+
+Caddy serves the API (`/api/*`, `/health*`) and the frontend from **one origin**,
+so the browser calls the host it loaded from: no CORS preflight on any request,
+and one origin for cookies, CSP and rate limiting to reason about. It obtains the
+certificate itself on the first HTTPS request and renews it. There is no certbot
+and no cron job to forget.
 
 The API, the worker and the migration job are the **same image with the same
 environment**, sourced from one YAML anchor. A worker pointed at a different
@@ -110,28 +121,31 @@ the price of shipping static files with no runtime, and it is worth paying.
 actually overwrites `X-Forwarded-For`. The header is client-supplied; trusting it
 without a proxy lets any caller reset its own rate limit by inventing an address.
 
-### 4. TLS
+### 4. A domain
 
-Compose binds the API to `127.0.0.1:8000` and the frontend to `127.0.0.1:8080`,
-so neither is reachable from the internet directly. Put a proxy in front. Caddy
-is the least ceremony:
+Caddy needs a hostname to get a certificate for. If you have none, **DuckDNS**
+gives you `something.duckdns.org` for free, pointed at your IP, in under a
+minute. It is on the Public Suffix List, so it gets its own Let's Encrypt
+rate-limit bucket rather than sharing one with every other user.
+
+Set it in `.env.prod`:
 
 ```
-devpilot.example.com {
-    handle /api/* {
-        reverse_proxy 127.0.0.1:8000
-    }
-    handle /health* {
-        reverse_proxy 127.0.0.1:8000
-    }
-    handle {
-        reverse_proxy 127.0.0.1:8080
-    }
-}
+DEVPILOT_DOMAIN=devpilot-yourname.duckdns.org
 ```
 
-Serving the frontend and the API from one origin removes the CORS preflight from
-every request and means cookies and CSP have one origin to reason about.
+Every other URL setting follows from it:
+
+```
+DEVPILOT_CORS_ORIGINS=https://devpilot-yourname.duckdns.org
+DEVPILOT_GITHUB_OAUTH_REDIRECT_URI=https://devpilot-yourname.duckdns.org/api/v1/github/callback
+DEVPILOT_FRONTEND_BASE_URL=https://devpilot-yourname.duckdns.org
+```
+
+`VITE_API_BASE_URL` is derived from `DEVPILOT_DOMAIN` at build time and is not
+set separately. It is a **build argument**, not a runtime variable: Vite inlines
+it into the bundle, so changing the domain means rebuilding the frontend image.
+That is the price of shipping static files with no runtime.
 
 ---
 
@@ -156,11 +170,17 @@ the code does not expect is worse than not serving traffic.
 ### Verifying
 
 ```bash
-curl -fsS https://devpilot.example.com/health          # liveness: the process is up
-curl -fsS https://devpilot.example.com/health/ready    # readiness: Postgres and Redis too
+curl -fsS https://$DEVPILOT_DOMAIN/health          # liveness: the process is up
+curl -fsS https://$DEVPILOT_DOMAIN/health/ready    # readiness: Postgres and Redis too
 docker compose -f docker-compose.prod.yml ps
 docker compose -f docker-compose.prod.yml logs --tail=50 worker
+docker compose -f docker-compose.prod.yml logs caddy | grep -i certificate
 ```
+
+The first HTTPS request takes a few seconds longer than the rest: that is Caddy
+obtaining the certificate. If it keeps failing, the two causes in order of
+likelihood are the domain not resolving to this host yet, and port 80 blocked.
+Let's Encrypt validates over plain HTTP before issuing.
 
 `/health/ready` returning 503 with a per-dependency breakdown is the fastest way
 to find out which backing service is the problem.
@@ -266,12 +286,73 @@ tests use.
 - [ ] Webhook URL on the App points at `https://.../api/v1/webhooks/github`
 - [ ] OAuth callback URL matches `DEVPILOT_GITHUB_OAUTH_REDIRECT_URI` exactly
 - [ ] `DEVPILOT_CORS_ORIGINS` lists only the real frontend origin
-- [ ] TLS terminating in front; `DEVPILOT_ENABLE_HSTS=true`
-- [ ] `DEVPILOT_TRUST_PROXY_HEADERS=true` **and** a proxy that sets the header
+- [ ] `DEVPILOT_DOMAIN` resolves to this host; ports 80 and 443 open in **both** firewalls
+- [ ] Caddy obtained a certificate (`logs caddy | grep certificate`)
 - [ ] `/health/ready` returns 200
 - [ ] A test webhook produces a completed review
 - [ ] `pg_dump` backup taken and restored once
 - [ ] Spend limit set if `LLM_MODE=anthropic`
+
+---
+
+## Walkthrough: Oracle Cloud Always Free
+
+A real virtual machine with a public IP, free indefinitely: 2 OCPUs and 12 GB on
+an ARM instance, well above what this stack needs. A card is required at sign-up
+for identity verification; Always Free resources are never billed.
+
+**1. Create the instance** (console: Compute, Instances, Create)
+
+- Image **Ubuntu 24.04** (Canonical); shape **VM.Standard.A1.Flex**, 2 OCPU / 12 GB
+- Networking: create a new VCN, and tick **assign a public IPv4 address**
+- SSH: paste your public key, or download the private key it generates
+
+**2. Open the ports in the cloud firewall.** There are two firewalls and both
+must be open; this is the one people miss.
+
+Networking, Virtual cloud networks, your VCN, Security lists, Default, **Add
+ingress rules**: source `0.0.0.0/0`, protocol TCP, destination port `80`; and
+again for `443`.
+
+**3. Point a domain at it.** At [duckdns.org](https://www.duckdns.org), sign in,
+add a subdomain, paste the instance's public IP.
+
+**4. Bootstrap the host.** SSH in as `ubuntu` and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HaryiankKumra/devpilot/main/deploy/bootstrap.sh | bash
+```
+
+It installs Docker, opens 80/443 in the *host* firewall (the second firewall:
+Oracle's images drop everything but SSH by default, in front of Docker's own
+rules), clones the repository, and writes a `.env.prod` with a generated secret
+key and database password. Then it stops and tells you what is left. Log out and
+back in so `docker` works without `sudo`.
+
+**5. Fill in `.env.prod`**: the domain, the Gemini keys, and the GitHub App
+values, exactly as the script's closing message lists them. Copy the App's
+`.pem` to `~/devpilot/secrets/github-app.pem`.
+
+**6. Start it.**
+
+```bash
+cd ~/devpilot
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+The first build takes a few minutes on the ARM instance. Then:
+
+```bash
+curl -fsS https://your.duckdns.org/health/ready
+```
+
+**7. Point the GitHub App at it.** In the App's settings, set the webhook URL to
+`https://your.duckdns.org/api/v1/webhooks/github` and the callback URL to
+`https://your.duckdns.org/api/v1/github/callback`. Open a pull request on an
+installed repository and watch it get reviewed.
+
+**Updating** is `git pull` and the same `up -d --build`. **Backups** are the
+`pg_dump` command above; `scp` the file off the instance.
 
 ---
 

@@ -27,8 +27,9 @@
 #   * Every service has memory and CPU limits, so one runaway process degrades
 #     itself rather than the host.
 #
-# TLS is not terminated here. Put this behind a reverse proxy (Caddy, nginx,
-# an ALB) that owns the certificate; see docs/deployment.md.
+# TLS is terminated by the `caddy` service below, which obtains a Let's
+# Encrypt certificate for DEVPILOT_DOMAIN on its own. Nothing else publishes a
+# port. See docs/deployment.md for the host-side steps.
 # =============================================================================
 
 x-api-image: &api-image
@@ -150,11 +151,13 @@ services:
         "--forwarded-allow-ips", "*",
         "--no-server-header",
       ]
-    ports:
-      # Bound to loopback: the reverse proxy on the host reaches it, the
-      # internet does not. Change to "8000:8000" only if something else is
-      # already terminating TLS in front of this host.
-      - "127.0.0.1:8000:8000"
+    # No `ports:`. Only `caddy` reaches this, by service name on the internal
+    # network. The one way into this stack from outside is port 443.
+    volumes:
+      # The GitHub App private key, as a file rather than an env var: a file
+      # is absent from `docker inspect`, `ps`, and crash dumps of the
+      # environment. Git-ignored on the host.
+      - ./secrets:/run/secrets:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -183,6 +186,11 @@ services:
         # and happens between tasks rather than during one.
         "--max-tasks-per-child=100",
       ]
+    volumes:
+      # The GitHub App private key, as a file rather than an env var: a file
+      # is absent from `docker inspect`, `ps`, and crash dumps of the
+      # environment. Git-ignored on the host.
+      - ./secrets:/run/secrets:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -220,10 +228,13 @@ services:
         # Vite inlines this at build time, so it is a build argument and the
         # image is environment-specific. Rebuilding is required to change it --
         # which is the tradeoff for shipping static files with no runtime.
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:?set VITE_API_BASE_URL}
+        #
+        # Caddy serves the API and the frontend from one origin, so the
+        # browser calls the same host it loaded from. That removes the CORS
+        # preflight from every request and means cookies, CSP and rate
+        # limiting have exactly one origin to reason about.
+        VITE_API_BASE_URL: https://${DEVPILOT_DOMAIN:?set DEVPILOT_DOMAIN}
     image: devpilot-frontend:${DEVPILOT_IMAGE_TAG:-latest}
-    ports:
-      - "127.0.0.1:8080:80"
     depends_on:
       - api
     deploy:
@@ -233,6 +244,46 @@ services:
     logging: *logging
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # TLS termination and routing. The only service with published ports.
+  #
+  # Caddy rather than nginx because it obtains and renews the Let's Encrypt
+  # certificate on its own: point DEVPILOT_DOMAIN at this host and the first
+  # request to port 443 triggers issuance. There is no certbot, no cron, and
+  # no renewal to forget. `/api/*` and `/health*` go to the API; everything
+  # else is the frontend.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      DEVPILOT_DOMAIN: ${DEVPILOT_DOMAIN:?set DEVPILOT_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and account keys. Losing this volume means re-issuing,
+      # which Let's Encrypt rate-limits -- keep it.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging: *logging
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   redis-data:
+  caddy-data:
+  caddy-config:

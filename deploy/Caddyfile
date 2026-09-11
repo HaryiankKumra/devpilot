@@ -1,0 +1,38 @@
+# DevPilot reverse proxy.
+#
+# One site, one certificate, two upstreams. Caddy obtains the certificate from
+# Let's Encrypt automatically for whatever DEVPILOT_DOMAIN resolves to this host
+# -- the first HTTPS request triggers issuance, and renewal is automatic.
+#
+# Locally, set DEVPILOT_DOMAIN=localhost and Caddy uses its own internal CA
+# instead, so the same file works for a smoke test with `curl -k`.
+#
+# No `email` global option on purpose: Caddy renews certificates itself, so the
+# expiry warnings Let's Encrypt would send to it are moot -- and an empty value
+# is a parse error that crash-loops the container, which is how this was found.
+
+{$DEVPILOT_DOMAIN} {
+	encode gzip zstd
+
+	# The API owns its own security headers (see middleware_security.py), so
+	# only the ones that apply to the static frontend are added here.
+	header /assets/* Cache-Control "public, max-age=31536000, immutable"
+
+	# Everything the browser or GitHub talks to the backend about.
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle /health* {
+		reverse_proxy api:8000
+	}
+
+	# The React bundle. nginx inside the container handles the SPA fallback.
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

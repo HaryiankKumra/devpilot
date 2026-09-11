@@ -389,9 +389,14 @@ docker compose -f docker-compose.prod.yml up -d --build
 [`docker-compose.prod.yml`](docker-compose.prod.yml) is a separate file, not an
 override on the dev one: an override can add and replace keys but never remove
 them, so the development bind mounts and `--reload` would survive into
-production. No source mounts, no reloader, no host ports on Postgres or Redis,
-memory and CPU limits on everything, and migrations as a one-shot job that must
-exit 0 before the API starts.
+production. No source mounts, no reloader, memory and CPU limits on everything,
+migrations as a one-shot job that must exit 0 before the API starts, and
+**Caddy terminating TLS inside the stack** — set `DEVPILOT_DOMAIN` and it gets
+its own Let's Encrypt certificate. Nothing but ports 80 and 443 is published.
+
+It runs for free on an Oracle Cloud Always Free VM; there is a
+[step-by-step walkthrough](docs/deployment.md#walkthrough-oracle-cloud-always-free)
+and a [bootstrap script](deploy/bootstrap.sh) that prepares a fresh Ubuntu host.
 
 The application **refuses to boot in production** while `DEVPILOT_SECRET_KEY` is
 still the development placeholder. Full walkthrough and pre-deploy checklist:

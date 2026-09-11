@@ -1529,6 +1529,9 @@ them in uvicorn would be worse at all three.
 **Cost:** you cannot attach `psql` from your laptop without an SSH tunnel. That is
 the intended difficulty.
 
+*Superseded in part by entry 120: TLS now terminates inside the stack, and the
+API and frontend publish no host ports at all.*
+
 ## 90. Every container caps its logs
 
 **Chosen:** `max-size: 10m`, `max-file: 5` on all six services.
@@ -2301,3 +2304,63 @@ contains.
 **Cost:** a model that writes a bulleted list gets literal asterisks. That is a
 legibility cost, not a correctness one, and it is visible rather than silent.
 
+
+## 120. TLS is terminated inside the stack
+
+**Chosen:** `docker-compose.prod.yml` includes a `caddy` service that owns ports
+80 and 443, obtains a Let's Encrypt certificate for `DEVPILOT_DOMAIN`, and
+routes `/api/*` and `/health*` to the API and everything else to the frontend.
+No other service publishes a port.
+
+**What entry 89 said:** bind the API and frontend to loopback and put a proxy
+"in front" on the host. That was correct as far as it went, and it left the
+hardest part of a deployment -- a certificate that renews -- as an exercise for
+whoever did the deploying.
+
+**Why:** the deployment target is a single free VM with nothing else on it.
+"Install a proxy, get a certificate, set up renewal" is three more things to
+get right on a machine that exists to run one `docker compose up`. Caddy does
+all three with a hostname and nothing else, and the result is a stack that is
+HTTPS end to end from one command.
+
+Serving the API and the frontend from **one origin** has a second benefit
+beyond convenience: the browser calls the host it loaded from, so no request
+needs a CORS preflight, and cookies, CSP and the rate limiter have exactly one
+origin to reason about. `VITE_API_BASE_URL` is now derived from the domain
+rather than set separately, which removes a way for them to disagree.
+
+**Cost:** a seventh container, and Caddy's certificate state lives in a volume
+that must survive redeploys -- Let's Encrypt rate-limits re-issuance, so losing
+it is more than an inconvenience. The `caddy-data` volume is named for that
+reason. Locally the same Caddyfile runs with `DEVPILOT_DOMAIN=localhost`, where
+Caddy issues from its internal CA and `curl -k` is enough to smoke-test the
+routing.
+
+## 121. The bootstrap script stops before starting the stack
+
+**Chosen:** `deploy/bootstrap.sh` installs Docker, opens the firewall, clones
+the repository and writes a `.env.prod` with a generated secret key and database
+password -- then prints what is left and exits. It never runs `docker compose
+up`.
+
+**Why:** the first start needs real values that only the operator has: the
+domain, the Gemini keys, the GitHub App identity. A script that started the
+stack anyway would have to invent placeholders for them, and placeholders that
+start a service are how they end up staying. The application already refuses
+to boot in production on the placeholder secret key; the script honours the
+same principle one step earlier by not manufacturing values it cannot know.
+
+The two things it *does* generate -- the signing key and the database password
+-- are the two that have no external counterpart and are worse if a human
+chooses them.
+
+**The firewall detail is the reason the script exists.** Oracle's Ubuntu images
+ship iptables rules that drop everything except SSH, and they sit in front of
+Docker's own rules. Opening the port in the cloud console is necessary but not
+sufficient, and the symptom -- works from the VM, times out from everywhere
+else -- points nowhere in particular. Encoding that in a script that anyone can
+read is worth more than a paragraph in a document that nobody reads until after
+they have hit it.
+
+**Cost:** it is Ubuntu-specific and assumes `apt`. That is what the free tier
+runs; supporting more would be speculative.
