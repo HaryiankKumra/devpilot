@@ -21,7 +21,7 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
   if (isLoading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
-        <p className="text-sm text-slate-500" role="status">
+        <p className="text-sm text-muted" role="status">
           Loading your account…
         </p>
       </div>

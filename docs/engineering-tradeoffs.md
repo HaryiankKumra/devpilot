@@ -2212,3 +2212,92 @@ and make the user poll -- is worse for exactly the person pressing the button.
 **How it was found:** by claiming, in a message, that a retry would "just
 repost" the stored review, and being told `409` by code I had written an hour
 earlier. The code was right.
+
+## 115. One dark palette, named by role
+
+**Chosen:** the Tailwind theme defines colours by *role* -- `ink`, `surface`,
+`raised`, `line`, `fg`, `muted`, `dim`, `accent` -- and pages use only those
+names. There is one accent colour, amber, and the four severity colours.
+
+**Alternative:** Tailwind's built-in shade scale (`slate-900`, `slate-500`, and
+so on) used directly in every component, which is what the first version did.
+
+**Why:** the first theme was twenty-six `text-slate-900`s and twenty-four
+`text-slate-500`s scattered across nine files, and changing the look meant
+touching every one. With roles, the whole theme is one object in the config,
+and a page that says `text-muted` still means "secondary text" whatever colour
+that turns out to be.
+
+The single accent is deliberate. The obvious way to make an "AI product" look
+is purple-to-blue gradients and glowing shapes; it has become the visual
+equivalent of the phrase "unleash the power of", and it tells an interviewer
+nothing about the work. Amber on near-black reads as an instrument panel --
+something that measures -- which is what the product is.
+
+**Cost:** the light theme is gone. Adding it back is a second colour object and
+a class on `<html>`, but it was not asked for, and one theme done well beats two
+done adequately.
+
+## 116. The background is a canvas, not a video
+
+**Chosen:** `Backdrop` draws a grid of points whose brightness follows a
+slowly drifting noise field, with a faint radial sweep, at about a hundred lines
+of arithmetic per frame.
+
+**Alternative:** a looping video, which is what "a moving background" usually
+means.
+
+**Why:** a video is megabytes on first load, loops visibly, cannot react to the
+viewport, and looks the same on every site that uses one. The canvas is a few
+kilobytes of code, scales to any screen, is deterministic (seeded noise, so it
+looks the same on every load), and respects `prefers-reduced-motion` by drawing
+one static frame. It is also deliberately quiet -- low contrast, slow, mostly
+grey with amber only at the peaks -- so it reads as texture behind the text
+rather than competing with it. On the dashboard it runs at less than half
+intensity, because there it sits behind data people read.
+
+**Cost:** a `requestAnimationFrame` loop while the page is open. It is a few
+thousand small `arc()` calls per frame, which is nothing on any hardware from
+the last decade, but it is not free.
+
+## 117. The landing page shows a real review happening
+
+**Chosen:** the hero contains a scripted, looping animation of one review --
+a diff, then findings appearing beside the lines they cite, then the risk
+score filling in -- rather than a screenshot or an illustration.
+
+**Why:** the product's claim is that findings are tied to lines and the score
+is computed from them. Showing that happening is more persuasive than saying
+it, and it is honest: the diff is a simplified version of a real pull request
+this system reviewed, and the two findings are the ones it found.
+
+Every sentence on the page is something the codebase does, usually with the
+mechanism named. "Checks every claim against the diff" is a function. "Critical
+10, high 7, medium 4, low 1" is the actual table. The numbers strip is real
+counts. Marketing copy that an engineer can verify against the source is the
+only kind that survives an interview.
+
+**Cost:** the animation is hand-scripted, so it will drift from the product if
+the pipeline changes shape. The stage list in it is short enough to keep in
+step.
+
+## 118. Model output is rendered with a forty-line renderer, not a Markdown library
+
+**Chosen:** `ModelText` handles fenced code blocks and inline backticks, and
+nothing else. Everything is emitted as React text nodes.
+
+**Alternative:** a Markdown library, which would handle headings, lists, links
+and tables too.
+
+**Why:** the text being rendered is written by a model prompted with a pull
+request that an arbitrary person authored. That is exactly the input an
+attacker most wants to control, and a full Markdown renderer is a full parser's
+worth of surface -- links to attacker-chosen URLs, images that beacon, and in
+some libraries raw HTML. Code blocks and backticks are what a review model
+actually produces; nothing else was appearing in real output, so nothing else
+is rendered. React text nodes cannot become markup, whatever the string
+contains.
+
+**Cost:** a model that writes a bulleted list gets literal asterisks. That is a
+legibility cost, not a correctness one, and it is visible rather than silent.
+

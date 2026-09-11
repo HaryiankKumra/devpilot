@@ -5,17 +5,20 @@ export function ApiStatusBadge() {
   const { data, isPending, isError } = useApiStatus();
 
   const { label, className } = isPending
-    ? { label: 'Checking API…', className: 'bg-slate-100 text-slate-600' }
+    ? { label: 'Checking API…', className: 'bg-raised text-muted' }
     : isError
-      ? { label: 'API unreachable', className: 'bg-red-100 text-red-800' }
+      ? {
+          label: 'API unreachable',
+          className: 'bg-severity-critical/15 text-severity-critical',
+        }
       : {
           label: `API ${data.version} · ${data.environment}`,
-          className: 'bg-emerald-100 text-emerald-800',
+          className: 'bg-emerald-400/10 text-emerald-300',
         };
 
   return (
     <span
-      className={`rounded-full px-2.5 py-1 text-xs font-medium ${className}`}
+      className={`rounded-full px-2.5 py-1 font-mono text-[11px] font-medium ${className}`}
       // Announce changes politely so the badge is useful to screen readers.
       role="status"
       aria-live="polite"

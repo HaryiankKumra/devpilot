@@ -36,7 +36,7 @@ export function LoginPage() {
       footer={
         <>
           No account?{' '}
-          <Link to="/register" className="font-medium text-slate-900 underline">
+          <Link to="/register" className="font-medium text-fg underline">
             Create one
           </Link>
         </>
@@ -64,7 +64,10 @@ export function LoginPage() {
 
         {login.isError && (
           // `role="alert"` so the failure is announced, not just displayed.
-          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+          <p
+            role="alert"
+            className="rounded-md bg-severity-critical/10 px-3 py-2 text-sm text-muted"
+          >
             {login.error.message}
           </p>
         )}
@@ -72,7 +75,7 @@ export function LoginPage() {
         <button
           type="submit"
           disabled={login.isPending}
-          className="w-full rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-60"
+          className="w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink shadow-glow transition hover:bg-accent-hover disabled:opacity-60"
         >
           {login.isPending ? 'Signing in…' : 'Sign in'}
         </button>

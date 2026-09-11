@@ -25,7 +25,7 @@ export function FormField({ label, error, hint, ...inputProps }: FormFieldProps)
 
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium text-slate-700">
+      <label htmlFor={id} className="block text-sm font-medium text-fg">
         {label}
       </label>
       <input
@@ -33,21 +33,21 @@ export function FormField({ label, error, hint, ...inputProps }: FormFieldProps)
         aria-invalid={error ? true : undefined}
         aria-describedby={describedBy || undefined}
         className={[
-          'w-full rounded-md border px-3 py-2 text-sm shadow-sm outline-none transition',
-          'focus:ring-2 focus:ring-slate-900/10',
+          'w-full rounded-md border bg-raised px-3 py-2 text-sm text-fg outline-none transition',
+          'placeholder:text-dim focus:ring-2 focus:ring-accent/25',
           error
-            ? 'border-red-400 focus:border-red-500'
-            : 'border-slate-300 focus:border-slate-500',
+            ? 'border-severity-critical/60 focus:border-severity-critical'
+            : 'border-line focus:border-accent',
         ].join(' ')}
         {...inputProps}
       />
       {hint && !error && (
-        <p id={hintId} className="text-xs text-slate-500">
+        <p id={hintId} className="text-xs text-muted">
           {hint}
         </p>
       )}
       {error && (
-        <p id={errorId} className="text-xs text-red-700">
+        <p id={errorId} className="text-xs text-severity-critical">
           {error}
         </p>
       )}

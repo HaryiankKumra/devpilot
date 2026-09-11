@@ -14,10 +14,10 @@ interface PagePlaceholderProps {
  */
 export function PagePlaceholder({ title, description, milestone }: PagePlaceholderProps) {
   return (
-    <section className="rounded-lg border border-dashed border-slate-300 bg-white p-8">
-      <h1 className="text-xl font-semibold text-slate-900">{title}</h1>
-      <p className="mt-2 max-w-prose text-sm text-slate-600">{description}</p>
-      <p className="mt-4 text-xs font-medium uppercase tracking-wide text-slate-400">
+    <section className="rounded-lg border border-dashed border-line bg-surface p-8">
+      <h1 className="text-xl font-semibold text-fg">{title}</h1>
+      <p className="mt-2 max-w-prose text-sm text-muted">{description}</p>
+      <p className="mt-4 text-xs font-medium uppercase tracking-wide text-dim">
         Not implemented yet · {milestone}
       </p>
     </section>

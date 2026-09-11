@@ -5,9 +5,63 @@
 @layer base {
   html {
     @apply antialiased;
+    color-scheme: dark;
   }
 
   body {
-    @apply bg-slate-50 text-slate-900;
+    @apply bg-ink text-fg;
+    font-feature-settings:
+      'cv02',
+      'cv03',
+      'cv04',
+      'cv11';
+  }
+
+  ::selection {
+    background: rgba(240, 180, 69, 0.28);
+  }
+
+  /* A thin, dark scrollbar: the default light one is the single most
+     visible thing that makes a dark UI look unfinished. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #232937 transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #232937;
+    border-radius: 999px;
+    border: 3px solid #0a0c11;
+  }
+
+  :focus-visible {
+    outline: 2px solid #f0b445;
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Fine horizontal rule with a soft centre, for section breaks. */
+  .hairline {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #2c3444 30%, #2c3444 70%, transparent);
+  }
+
+  /* Small uppercase label, the kind an instrument panel uses. */
+  .eyebrow {
+    @apply font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-accent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

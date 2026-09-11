@@ -7,16 +7,21 @@ export function PageHeader({
   title,
   description,
   action,
+  eyebrow,
 }: {
   title: string;
   description?: string;
   action?: ReactNode;
+  eyebrow?: string;
 }) {
   return (
-    <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="mb-8 flex flex-wrap items-end justify-between gap-4 animate-rise">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight text-slate-900">{title}</h1>
-        {description && <p className="mt-1 text-sm text-slate-600">{description}</p>}
+        {eyebrow && <p className="eyebrow mb-2">{eyebrow}</p>}
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">{title}</h1>
+        {description && (
+          <p className="mt-1.5 max-w-2xl text-sm text-muted">{description}</p>
+        )}
       </div>
       {action}
     </div>
@@ -31,7 +36,9 @@ export function Card({
   className?: string;
 }) {
   return (
-    <div className={`rounded-lg border border-slate-200 bg-white ${className}`}>
+    <div
+      className={`rounded-xl border border-line bg-surface/80 shadow-card backdrop-blur ${className}`}
+    >
       {children}
     </div>
   );
@@ -51,18 +58,22 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-dashed border-slate-300 bg-white p-10 text-center">
-      <p className="text-sm font-medium text-slate-900">{title}</p>
-      <p className="mx-auto mt-1 max-w-md text-sm text-slate-600">{description}</p>
-      {action && <div className="mt-4">{action}</div>}
+    <div className="rounded-xl border border-dashed border-line bg-surface/50 p-12 text-center">
+      <p className="text-sm font-medium text-fg">{title}</p>
+      <p className="mx-auto mt-1.5 max-w-md text-sm text-muted">{description}</p>
+      {action && <div className="mt-5">{action}</div>}
     </div>
   );
 }
 
 export function LoadingState({ label = 'Loading…' }: { label?: string }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-10 text-center">
-      <p className="text-sm text-slate-500" role="status">
+    <div className="relative overflow-hidden rounded-xl border border-line bg-surface/60 p-12 text-center">
+      {/* A thin sweep instead of a spinner: cheaper, and it matches the rest. */}
+      <div className="absolute inset-x-0 top-0 h-px overflow-hidden">
+        <div className="h-full w-1/3 animate-sweep bg-gradient-to-r from-transparent via-accent to-transparent" />
+      </div>
+      <p className="font-mono text-xs text-muted" role="status">
         {label}
       </p>
     </div>
@@ -77,14 +88,17 @@ export function ErrorState({
   onRetry?: () => void;
 }) {
   return (
-    <div className="rounded-lg border border-red-200 bg-red-50 p-6" role="alert">
-      <p className="text-sm font-medium text-red-900">Something went wrong</p>
-      <p className="mt-1 text-sm text-red-800">{message}</p>
+    <div
+      className="rounded-xl border border-severity-critical/40 bg-severity-critical/10 p-5"
+      role="alert"
+    >
+      <p className="text-sm font-medium text-fg">Something went wrong</p>
+      <p className="mt-1 font-mono text-xs text-muted">{message}</p>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-900 hover:bg-red-100"
+          className="mt-3 rounded-md border border-line bg-raised px-3 py-1.5 text-sm font-medium text-fg transition hover:border-muted"
         >
           Try again
         </button>
@@ -108,15 +122,15 @@ export function Button({
 }) {
   const styles =
     variant === 'primary'
-      ? 'bg-slate-900 text-white hover:bg-slate-800'
-      : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50';
+      ? 'bg-accent text-accent-ink hover:bg-accent-hover shadow-glow'
+      : 'border border-line bg-raised text-fg hover:border-muted';
 
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-md px-3 py-1.5 text-sm font-medium transition disabled:opacity-60 ${styles}`}
+      className={`rounded-md px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${styles}`}
     >
       {children}
     </button>
@@ -127,7 +141,7 @@ export function CardLink({ to, children }: { to: string; children: ReactNode }) 
   return (
     <Link
       to={to}
-      className="block rounded-lg border border-slate-200 bg-white p-4 transition hover:border-slate-300 hover:bg-slate-50"
+      className="block rounded-xl border border-line bg-surface/80 p-4 shadow-card backdrop-blur transition hover:border-muted hover:bg-raised"
     >
       {children}
     </Link>
@@ -137,7 +151,7 @@ export function CardLink({ to, children }: { to: string; children: ReactNode }) 
 /** Short commit SHAs, the way every Git tool shows them. */
 export function ShortSha({ sha }: { sha: string }) {
   return (
-    <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">
+    <code className="rounded bg-raised px-1.5 py-0.5 font-mono text-xs text-muted">
       {sha.slice(0, 7)}
     </code>
   );
@@ -162,7 +176,11 @@ export function RelativeTime({ iso }: { iso: string }) {
           : `${Math.floor(seconds / 86400)}d ago`;
 
   return (
-    <time dateTime={iso} title={date.toLocaleString()} className="text-xs text-slate-500">
+    <time
+      dateTime={iso}
+      title={date.toLocaleString()}
+      className="font-mono text-xs text-dim"
+    >
       {label}
     </time>
   );

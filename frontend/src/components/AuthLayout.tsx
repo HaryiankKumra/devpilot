@@ -1,3 +1,5 @@
+import { Backdrop } from '@/components/Backdrop';
+import { Wordmark } from '@/components/Wordmark';
 import type { ReactNode } from 'react';
 
 interface AuthLayoutProps {
@@ -11,21 +13,22 @@ interface AuthLayoutProps {
 export function AuthLayout({ title, subtitle, children, footer }: AuthLayoutProps) {
   return (
     <div className="flex min-h-screen items-center justify-center px-4 py-12">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-            DevPilot
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">AI-powered pull request review</p>
+      <Backdrop />
+      <div className="w-full max-w-sm animate-rise">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <Wordmark size="lg" />
+          <p className="mt-2 font-mono text-xs text-dim">
+            pull request review, with the receipts
+          </p>
         </div>
 
-        <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-          <p className="mt-1 text-sm text-slate-600">{subtitle}</p>
+        <div className="rounded-xl border border-line bg-surface/80 p-6 shadow-card backdrop-blur">
+          <h2 className="text-lg font-semibold text-fg">{title}</h2>
+          <p className="mt-1 text-sm text-muted">{subtitle}</p>
           <div className="mt-6">{children}</div>
         </div>
 
-        <p className="mt-6 text-center text-sm text-slate-600">{footer}</p>
+        <p className="mt-6 text-center text-sm text-muted">{footer}</p>
       </div>
     </div>
   );

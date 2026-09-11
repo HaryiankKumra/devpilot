@@ -28,21 +28,21 @@ export function SettingsPage() {
       />
 
       <Card className="mb-6 p-5">
-        <h2 className="text-sm font-semibold text-slate-900">Account</h2>
+        <h2 className="text-sm font-semibold text-fg">Account</h2>
         <dl className="mt-3 space-y-2 text-sm">
           <div className="flex gap-3">
-            <dt className="w-32 text-slate-500">Email</dt>
-            <dd className="text-slate-900">{user?.email ?? '—'}</dd>
+            <dt className="w-32 text-muted">Email</dt>
+            <dd className="text-fg">{user?.email ?? '—'}</dd>
           </div>
           <div className="flex gap-3">
-            <dt className="w-32 text-slate-500">Name</dt>
-            <dd className="text-slate-900">{user?.full_name ?? '—'}</dd>
+            <dt className="w-32 text-muted">Name</dt>
+            <dd className="text-fg">{user?.full_name ?? '—'}</dd>
           </div>
         </dl>
       </Card>
 
       <Card className="p-5">
-        <h2 className="text-sm font-semibold text-slate-900">GitHub</h2>
+        <h2 className="text-sm font-semibold text-fg">GitHub</h2>
 
         {status.isPending && <LoadingState label="Checking connection…" />}
         {status.isError && <ErrorState message={status.error.message} />}
@@ -51,11 +51,9 @@ export function SettingsPage() {
           <div className="mt-3">
             {status.data.linked ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-sm text-slate-700">
+                <p className="text-sm text-fg">
                   Connected as{' '}
-                  <span className="font-medium text-slate-900">
-                    {status.data.github_login}
-                  </span>
+                  <span className="font-medium text-fg">{status.data.github_login}</span>
                 </p>
                 <Button
                   variant="secondary"
@@ -67,7 +65,7 @@ export function SettingsPage() {
               </div>
             ) : (
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-sm text-slate-700">
+                <p className="text-sm text-fg">
                   No GitHub account connected. Linking lets DevPilot tell which
                   installation belongs to you.
                 </p>
@@ -82,7 +80,7 @@ export function SettingsPage() {
               <p className="mt-3 text-sm">
                 <a
                   href={status.data.install_url}
-                  className="font-medium text-slate-900 underline"
+                  className="font-medium text-fg underline"
                   target="_blank"
                   rel="noreferrer"
                 >
@@ -93,7 +91,7 @@ export function SettingsPage() {
 
             {!status.data.install_url && (
               /* No app slug configured, so the link would lead nowhere. */
-              <p className="mt-3 text-xs text-slate-500">
+              <p className="mt-3 text-xs text-muted">
                 Running in mock mode — no GitHub App is configured, and none is needed.
                 See docs/github-app-setup.md to connect a real one.
               </p>

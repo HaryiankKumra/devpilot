@@ -57,7 +57,7 @@ export function RegisterPage() {
       footer={
         <>
           Already registered?{' '}
-          <Link to="/login" className="font-medium text-slate-900 underline">
+          <Link to="/login" className="font-medium text-fg underline">
             Sign in
           </Link>
         </>
@@ -100,7 +100,10 @@ export function RegisterPage() {
         />
 
         {failure && (
-          <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+          <p
+            role="alert"
+            className="rounded-md bg-severity-critical/10 px-3 py-2 text-sm text-muted"
+          >
             {failure.message}
           </p>
         )}
@@ -108,7 +111,7 @@ export function RegisterPage() {
         <button
           type="submit"
           disabled={isSubmitting}
-          className="w-full rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-60"
+          className="w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink shadow-glow transition hover:bg-accent-hover disabled:opacity-60"
         >
           {isSubmitting ? 'Creating account…' : 'Create account'}
         </button>

@@ -12,9 +12,9 @@ import { useRepository, useRepositoryPullRequests } from '@/features/reviews/hoo
 import { useParams } from 'react-router-dom';
 
 const STATE_STYLES: Record<string, string> = {
-  open: 'bg-emerald-100 text-emerald-900',
+  open: 'bg-emerald-400/10 text-emerald-300',
   merged: 'bg-violet-100 text-violet-900',
-  closed: 'bg-slate-100 text-slate-700',
+  closed: 'bg-raised text-fg',
 };
 
 export function RepositoryDetailPage() {
@@ -58,8 +58,8 @@ export function RepositoryDetailPage() {
           {pullRequests.data.map((pullRequest) => (
             <CardLink key={pullRequest.id} to={`/pull-requests/${pullRequest.id}`}>
               <div className="flex flex-wrap items-center gap-3">
-                <span className="text-sm text-slate-500">#{pullRequest.number}</span>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-900">
+                <span className="text-sm text-muted">#{pullRequest.number}</span>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
                   {pullRequest.title}
                 </span>
                 <span
@@ -70,7 +70,7 @@ export function RepositoryDetailPage() {
                   {pullRequest.state}
                 </span>
               </div>
-              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
                 <span>{pullRequest.author_login}</span>
                 <ShortSha sha={pullRequest.head_sha} />
                 <span>
@@ -84,7 +84,7 @@ export function RepositoryDetailPage() {
       )}
 
       <Card className="mt-6 p-4">
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted">
           Default branch {repository.data.default_branch} ·{' '}
           {repository.data.is_private ? 'private' : 'public'} · GitHub id{' '}
           {repository.data.github_repo_id}

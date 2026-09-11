@@ -9,6 +9,7 @@
 import { AppLayout } from '@/components/AppLayout';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { DashboardPage } from '@/pages/DashboardPage';
+import { LandingPage } from '@/pages/LandingPage';
 import { LoginPage } from '@/pages/LoginPage';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import { PullRequestDetailPage } from '@/pages/PullRequestDetailPage';
@@ -17,9 +18,11 @@ import { RepositoriesPage } from '@/pages/RepositoriesPage';
 import { RepositoryDetailPage } from '@/pages/RepositoryDetailPage';
 import { ReviewDetailPage } from '@/pages/ReviewDetailPage';
 import { SettingsPage } from '@/pages/SettingsPage';
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { createBrowserRouter } from 'react-router-dom';
 
 export const router = createBrowserRouter([
+  // Public: the front page explains the product to someone with no account.
+  { path: '/', element: <LandingPage /> },
   { path: '/login', element: <LoginPage /> },
   { path: '/register', element: <RegisterPage /> },
   {
@@ -30,7 +33,6 @@ export const router = createBrowserRouter([
       </ProtectedRoute>
     ),
     children: [
-      { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: <DashboardPage /> },
       { path: 'repositories', element: <RepositoriesPage /> },
       { path: 'repositories/:repositoryId', element: <RepositoryDetailPage /> },

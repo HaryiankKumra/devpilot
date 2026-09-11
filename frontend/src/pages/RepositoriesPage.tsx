@@ -40,7 +40,7 @@ export function RepositoriesPage() {
       {sync.isError && <ErrorState message={sync.error.message} />}
       {sync.isSuccess && (
         <Card className="mb-4 p-3">
-          <p className="text-sm text-slate-700">
+          <p className="text-sm text-fg">
             {sync.data.created} added · {sync.data.updated} updated ·{' '}
             {sync.data.deactivated} deactivated
           </p>
@@ -60,7 +60,7 @@ export function RepositoriesPage() {
           action={
             <Link
               to="/settings"
-              className="inline-flex items-center rounded-md bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-700"
+              className="inline-flex items-center rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-ink shadow-glow hover:bg-accent-hover"
             >
               Connect GitHub
             </Link>
@@ -86,11 +86,11 @@ export function RepositoriesPage() {
                 <div className="min-w-0">
                   <Link
                     to={`/repositories/${repository.id}`}
-                    className="text-sm font-medium text-slate-900 hover:underline"
+                    className="text-sm font-medium text-fg hover:underline"
                   >
                     {repository.full_name}
                   </Link>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
                     <span>{repository.is_private ? 'Private' : 'Public'}</span>
                     <span>·</span>
                     <span>{repository.default_branch}</span>
@@ -99,7 +99,7 @@ export function RepositoriesPage() {
                         <span>·</span>
                         {/* Deactivated rather than deleted, so history survives
                             an uninstall. */}
-                        <span className="text-amber-700">app uninstalled</span>
+                        <span className="text-severity-medium">app uninstalled</span>
                       </>
                     )}
                   </div>
@@ -107,11 +107,11 @@ export function RepositoriesPage() {
 
                 <div className="flex items-center gap-3">
                   {repository.indexed_at ? (
-                    <span className="text-xs text-slate-500">
+                    <span className="text-xs text-muted">
                       indexed <RelativeTime iso={repository.indexed_at} />
                     </span>
                   ) : (
-                    <span className="text-xs text-slate-400">not indexed</span>
+                    <span className="text-xs text-dim">not indexed</span>
                   )}
                   <Button
                     variant="secondary"
@@ -128,7 +128,7 @@ export function RepositoriesPage() {
       )}
 
       <Card className="mt-6 p-4">
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-muted">
           Indexing embeds the repository so reviews can retrieve related code. It runs on
           a worker and takes a moment; re-indexing only embeds what changed.
         </p>
