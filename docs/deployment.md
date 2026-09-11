@@ -356,6 +356,43 @@ installed repository and watch it get reviewed.
 
 ---
 
+## Alternative: one container, no card (Render + Neon)
+
+If you cannot get a VM -- no card, or a provider that will not take yours --
+there is a second target that costs nothing and asks for no card anywhere:
+
+| Piece | Where | Why |
+|---|---|---|
+| API + worker + frontend | Render free web service | 750 hours a month is exactly one service, 24/7 |
+| PostgreSQL + pgvector | [Neon](https://neon.tech) free | Render's free Postgres is deleted after 30 days; Neon's is permanent |
+| Redis | Render Key Value free | Broker and rate-limit counters |
+| HTTPS | `https://<name>.onrender.com` | Provided; webhooks work |
+
+The trade is that one free service means **one container**, so
+`deploy/single/Dockerfile` runs the API, the Celery worker and the built
+frontend together. The API serves the bundle itself (see `app/api/spa.py`),
+and the entrypoint exits if *either* process dies so a dead worker cannot hide
+behind a healthy API. [`render.yaml`](../render.yaml) describes both services;
+Render reads it as a Blueprint and prompts for the secrets.
+
+Two free-tier behaviours to know:
+
+- **Spin-down.** Idle services sleep after 15 minutes and take about a minute
+  to wake. A webhook arriving in that minute is lost -- GitHub does not retry.
+  Point a free pinger (cron-job.org, UptimeRobot) at `/health` every 10 minutes
+  and it never sleeps; 750 hours covers the whole month.
+- **512 MB of RAM.** The entrypoint runs one uvicorn worker and a solo-pool
+  Celery worker for that reason. It is enough for reviews; it is not enough for
+  indexing a large repository.
+
+Neon's connection string is plain `postgresql://`; paste it as-is, the
+application rewrites it to the installed driver.
+
+The Compose deployment above remains the reference. This one is what you run
+when a VM is not an option.
+
+---
+
 ## What this deliberately is not
 
 **No Kubernetes.** One host running Compose is understandable end to end and

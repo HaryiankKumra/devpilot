@@ -1,0 +1,98 @@
+# =============================================================================
+# DevPilot on Render's free tier -- no card required.
+#
+# One web service runs the API, the Celery worker and the static frontend from
+# a single container (deploy/single/Dockerfile). Redis is Render's free Key
+# Value instance. PostgreSQL is *not* Render's: the free database is deleted
+# after 30 days, so it lives on Neon (free, permanent, pgvector included) and
+# arrives here as DEVPILOT_DATABASE_URL.
+#
+# Deploy: New -> Blueprint -> point at this repository. Render reads this file,
+# creates both services, and prompts for every value marked `sync: false`.
+#
+# Free-tier facts that shaped this file:
+#   * 750 instance hours a month -- exactly enough for one service to run 24/7,
+#     which is why everything is in one container.
+#   * Services spin down after 15 idle minutes and take ~1 minute to wake. A
+#     webhook arriving in that minute is lost (GitHub does not retry), so an
+#     external pinger hitting /health every 10 minutes keeps it awake. See
+#     docs/deployment.md.
+#   * 512 MB of RAM. The entrypoint runs one uvicorn worker and a solo-pool
+#     Celery worker for that reason.
+# =============================================================================
+
+services:
+  - type: web
+    name: devpilot
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./deploy/single/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # Render's free tier does not restart on a non-zero exit; the entrypoint
+    # exits if either process dies precisely so that the platform notices.
+    autoDeploy: true
+    envVars:
+      # --- provided by Render -------------------------------------------------
+      - key: PORT
+        value: "10000"
+      - key: DEVPILOT_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: devpilot-redis
+          property: connectionString
+
+      # --- fixed for this deployment ------------------------------------------
+      - key: DEVPILOT_ENVIRONMENT
+        value: production
+      - key: DEVPILOT_DEBUG
+        value: "false"
+      # Render terminates TLS and sets X-Forwarded-For; trusting it is correct
+      # here and only here.
+      - key: DEVPILOT_TRUST_PROXY_HEADERS
+        value: "true"
+      - key: DEVPILOT_ENABLE_HSTS
+        value: "true"
+      - key: DEVPILOT_LLM_MODE
+        value: gemini
+      - key: DEVPILOT_GITHUB_MODE
+        value: live
+      # Same origin serves the frontend, so this is the only allowed origin.
+      # Set to https://<your-service>.onrender.com once you know the name.
+      - key: DEVPILOT_CORS_ORIGINS
+        sync: false
+      - key: DEVPILOT_FRONTEND_BASE_URL
+        sync: false
+      - key: DEVPILOT_GITHUB_OAUTH_REDIRECT_URI
+        sync: false
+
+      # --- secrets: Render prompts for these, never stored in this file -------
+      - key: DEVPILOT_SECRET_KEY
+        generateValue: true
+      - key: DEVPILOT_DATABASE_URL
+        sync: false # Neon connection string, postgresql+psycopg://...?sslmode=require
+      - key: DEVPILOT_GEMINI_API_KEYS
+        sync: false
+      - key: DEVPILOT_GITHUB_APP_ID
+        sync: false
+      - key: DEVPILOT_GITHUB_APP_SLUG
+        sync: false
+      - key: DEVPILOT_GITHUB_APP_PRIVATE_KEY
+        sync: false # paste the whole PEM; escaped \n is accepted
+      - key: DEVPILOT_GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: DEVPILOT_GITHUB_CLIENT_ID
+        sync: false
+      - key: DEVPILOT_GITHUB_CLIENT_SECRET
+        sync: false
+
+  - type: keyvalue
+    name: devpilot-redis
+    plan: free
+    region: singapore
+    # Only the web service may connect. An empty allow list means "internal
+    # network only", which is exactly right for a broker.
+    ipAllowList: []
+    # A queue must refuse writes when full rather than silently drop jobs.
+    maxmemoryPolicy: noeviction

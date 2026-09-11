@@ -16,10 +16,25 @@ function readRequired(name: string, value: string | undefined): string {
   return value;
 }
 
+/**
+ * Base URL of the DevPilot API, as reachable from the browser.
+ *
+ * `/` means "the origin this page was loaded from", for deployments where the
+ * API serves the frontend itself. It becomes an empty prefix, so requests go
+ * to `/api/v1/...` on the current host -- no CORS, and nothing to rebuild when
+ * the hostname changes.
+ */
+function apiBaseUrl(raw: string): string {
+  const value = raw.trim();
+  if (value === '/') return '';
+  return value.replace(/\/$/, '');
+}
+
 export const env = {
-  /** Base URL of the DevPilot API, as reachable from the browser. */
-  apiBaseUrl: readRequired(
-    'VITE_API_BASE_URL',
-    import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000',
-  ).replace(/\/$/, ''),
+  apiBaseUrl: apiBaseUrl(
+    readRequired(
+      'VITE_API_BASE_URL',
+      import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000',
+    ),
+  ),
 } as const;

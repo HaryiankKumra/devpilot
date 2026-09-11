@@ -2364,3 +2364,52 @@ they have hit it.
 
 **Cost:** it is Ubuntu-specific and assumes `apt`. That is what the free tier
 runs; supporting more would be speculative.
+
+## 122. A single-container image for hosts that give you one service
+
+**Chosen:** `deploy/single/Dockerfile` builds the frontend, installs the API,
+and runs uvicorn and a solo-pool Celery worker side by side under one
+entrypoint. The API serves the static bundle itself. `render.yaml` describes the
+deployment.
+
+**Why it exists:** the free tiers that ask for no card -- Render foremost --
+give you one always-on web service, not a machine. The Compose stack needs
+three processes and a proxy; the only way to run it there is to collapse it.
+This is a compromise made on purpose and labelled as one: the Compose files
+remain the reference, and this is what you run when a VM is not available.
+
+Three things had to be true for the collapse to be safe:
+
+* **The API's CSP would have blanked the page.** The security middleware sets
+  `default-src 'none'` on every response, which is right for JSON and fatal for
+  an HTML document. The document response sets a frontend policy of its own,
+  and the middleware's `setdefault` leaves it alone. A test pins this, because
+  it is the kind of thing that passes every API test and fails in a browser.
+
+* **A catch-all route swallows 404s.** The SPA fallback must answer unknown
+  paths with `index.html` so a refresh works -- but an unknown `/api/...` path
+  must still be a JSON 404, not a 200 with a web page in it. The fallback
+  refuses the API prefixes.
+
+* **A dead worker must not hide behind a healthy API.** Two processes in one
+  container means the platform's health check only sees one. The entrypoint
+  waits on both and exits when either dies, so the failure becomes a restart
+  rather than a week of silently unreviewed pull requests.
+
+**Cost:** one restart unit, one memory budget, no independent scaling. All
+acceptable at free-tier size and exactly the things to undo when it grows.
+
+## 123. Plain `postgresql://` URLs are rewritten to the installed driver
+
+**Chosen:** a validator on `database_url` turns `postgresql://` into
+`postgresql+psycopg://`.
+
+**Why:** hosted providers hand out the plain scheme, SQLAlchemy reads it as
+"use psycopg2", psycopg2 is not installed, and the failure is an `ImportError`
+from deep inside Alembic that mentions no URL at all. It surfaced the first time
+the single-container image ran against a URL pasted from a dashboard. A
+one-line rewrite means the string works as copied.
+
+**Cost:** a URL that genuinely meant psycopg2 would be silently redirected.
+Nothing here can mean that, because psycopg2 is not a dependency.
+

@@ -295,6 +295,13 @@ class Settings(BaseSettings):
     # this on without such a proxy lets anyone reset their own rate limit.
     trust_proxy_headers: bool = False
 
+    # Directory holding the built frontend (`index.html` and `assets/`). When
+    # set, the API serves it as a single-page app behind every API route. Used
+    # by the single-container deployment, where one free web service has to be
+    # the API, the worker and the static site at once. Unset under Compose,
+    # where nginx serves the bundle.
+    static_dir: Path | None = None
+
     # --- Security headers ----------------------------------------------------
     # HSTS is only meaningful over HTTPS, and setting it in local development
     # would pin `localhost` to https in the browser for a year.
@@ -449,6 +456,20 @@ class Settings(BaseSettings):
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"]
     )
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _select_the_installed_driver(cls, value: object) -> object:
+        """Accept a plain `postgresql://` URL and route it to psycopg 3.
+
+        Hosted providers hand out `postgresql://...`. SQLAlchemy reads that as
+        "use psycopg2", which is not installed here, and fails on the first
+        connection with an ImportError that says nothing about URLs. Rewriting
+        the scheme means the string from Neon's dashboard works as pasted.
+        """
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgresql://")
+        return value
 
     @field_validator("cors_origins", mode="before")
     @classmethod

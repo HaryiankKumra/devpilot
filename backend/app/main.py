@@ -78,6 +78,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
+    # Last, because its catch-all route must lose to every real route above.
+    # Only in the single-container deployment; Compose serves the bundle from
+    # nginx and leaves this unset.
+    if settings.static_dir is not None:
+        from app.api.spa import mount_spa
+
+        mount_spa(app, settings.static_dir)
+
     return app
 
 
