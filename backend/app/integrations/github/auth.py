@@ -53,7 +53,12 @@ def build_app_jwt(settings: Settings, *, now: datetime | None = None) -> str:
             "DEVPILOT_GITHUB_APP_ID is not set. See docs/github-app-setup.md."
         )
 
-    private_key = settings.resolve_github_private_key()
+    try:
+        private_key = settings.resolve_github_private_key()
+    except ValueError as exc:
+        # A missing key file or an incomplete PEM; the message already says
+        # which and where, so pass it through as the configuration error it is.
+        raise GitHubConfigurationError(str(exc)) from exc
     if not private_key:
         raise GitHubConfigurationError(
             "No GitHub App private key configured. Set "

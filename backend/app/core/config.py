@@ -116,6 +116,28 @@ class LogLevel(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+def require_complete_pem(value: str, source: str) -> str:
+    """Refuse a private key that is not a whole PEM, naming what went wrong.
+
+    PyJWT reports every malformed key as "Could not parse the provided public
+    key", which is wrong twice over (it is the private key, and it was not
+    parsed because it was never complete). The usual cause is a single-line
+    input box -- a PaaS environment editor keeps only the first line of a
+    pasted `.pem` -- or the fingerprint copied instead of the file. Mangled
+    line breaks are *not* a problem: the parser accepts a PEM flattened onto
+    one line, so this checks only that both markers are present.
+    """
+    if "-----BEGIN " not in value or "-----END " not in value:
+        raise ValueError(
+            f"{source} is not a complete PEM private key: it must contain both the "
+            "'-----BEGIN ... PRIVATE KEY-----' and '-----END ... PRIVATE KEY-----' "
+            "lines. A single-line settings box usually keeps only the first line; "
+            "supply the key as a file (DEVPILOT_GITHUB_APP_PRIVATE_KEY_PATH) instead, "
+            "and check that the value is the .pem file, not its fingerprint."
+        )
+    return value
+
+
 class Settings(BaseSettings):
     """Runtime settings, populated from `DEVPILOT_*` environment variables."""
 
@@ -431,7 +453,7 @@ class Settings(BaseSettings):
             # a `.env` file or a CI secret, so accept both spellings.
             inline = self.github_app_private_key.get_secret_value().replace("\\n", "\n")
             if inline.strip():
-                return inline
+                return require_complete_pem(inline, "DEVPILOT_GITHUB_APP_PRIVATE_KEY")
 
         if self.github_app_private_key_path is not None:
             path = self.github_app_private_key_path
@@ -446,7 +468,7 @@ class Settings(BaseSettings):
                     "*in the container* -- mount the .pem and point at the "
                     "mounted location."
                 )
-            return path.read_text(encoding="utf-8")
+            return require_complete_pem(path.read_text(encoding="utf-8"), str(path))
 
         return None
 

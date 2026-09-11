@@ -109,10 +109,25 @@ class TestBuildAppJwt:
         settings = Settings(
             _env_file=None,
             github_app_id=APP_ID,
-            github_app_private_key=SecretStr("-----BEGIN PRIVATE KEY-----\nnope\n"),
+            github_app_private_key=SecretStr(
+                "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----\n"
+            ),
         )
 
         with pytest.raises(GitHubConfigurationError):
+            build_app_jwt(settings)
+
+    def test_reports_an_incomplete_private_key_as_configuration(self) -> None:
+        """Only the first line of a .pem made it into the environment. The
+        loader's message names the cause; it must reach the caller as a
+        configuration error (503), not as an unhandled ValueError (500)."""
+        settings = Settings(
+            _env_file=None,
+            github_app_id=APP_ID,
+            github_app_private_key=SecretStr("-----BEGIN RSA PRIVATE KEY-----"),
+        )
+
+        with pytest.raises(GitHubConfigurationError, match="not a complete PEM"):
             build_app_jwt(settings)
 
     def test_reads_the_key_from_a_file_when_configured(

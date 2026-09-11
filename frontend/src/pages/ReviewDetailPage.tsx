@@ -134,11 +134,15 @@ function FindingCard({ finding }: { finding: Finding }) {
 
       {!finding.is_posted && (
         // Explains the difference between what is here and what reached the
-        // pull request, so the gap does not read as a bug.
+        // pull request, so the gap does not read as a bug. The page cannot
+        // tell *which* gate held a line-level finding back -- the confidence
+        // threshold or the deployment's posting switch -- so it names both;
+        // a first deploy showed a 95%-confident finding labelled "below the
+        // confidence threshold" when posting was simply off.
         <p className="mt-3 text-xs text-muted">
           {finding.line === null
             ? 'Concerns the file as a whole, so there is no line to comment on.'
-            : 'Below the confidence threshold for posting, so it stays here.'}
+            : 'Not on the pull request: below the confidence threshold for posting, or posting is switched off for this deployment.'}
         </p>
       )}
     </Card>

@@ -391,6 +391,12 @@ application rewrites it to the installed driver. Create the Neon project in
 the round trip, and a database on the other side of the Pacific adds ~200 ms
 to each one.
 
+`render.yaml` sets `DEVPILOT_POST_REVIEWS_TO_GITHUB=true`. The code default
+is `false` -- a half-configured deployment should stay silent on other
+people's pull requests -- and the first live deploy ran with that default:
+every review was produced and shown on the dashboard, and none reached
+GitHub. Findings whose card says "posting is switched off" mean this switch.
+
 Use Neon's **direct** endpoint, not the pooled one: if the hostname contains
 `-pooler`, remove it. The pooled endpoint is PgBouncer, which adds nothing for
 a single instance with its own pool and, in transaction mode, cannot promise

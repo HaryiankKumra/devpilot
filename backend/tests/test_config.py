@@ -128,7 +128,7 @@ class TestGitHubPrivateKeyResolution:
         """A real PEM rarely survives a .env file with literal newlines."""
         loaded = Settings(
             _env_file=None,
-            github_app_private_key=SecretStr(self.PEM.replace("\n", "\n")),
+            github_app_private_key=SecretStr(self.PEM.replace("\n", "\\n")),
         )
 
         assert loaded.resolve_github_private_key() == self.PEM
@@ -179,6 +179,32 @@ class TestGitHubPrivateKeyResolution:
         )
 
         assert loaded.resolve_github_private_key() == self.PEM
+
+    def test_rejects_a_key_that_is_only_the_first_line(self) -> None:
+        """A single-line settings box keeps the first line of a pasted .pem.
+        PyJWT then says "Could not parse the provided public key", which
+        points nowhere useful. Found on the first live deploy."""
+        loaded = Settings(
+            _env_file=None,
+            github_app_private_key=SecretStr("-----BEGIN RSA PRIVATE KEY-----"),
+        )
+
+        with pytest.raises(ValueError, match="not a complete PEM"):
+            loaded.resolve_github_private_key()
+
+    def test_rejects_a_fingerprint_pasted_as_the_key(self) -> None:
+        loaded = Settings(_env_file=None, github_app_private_key=SecretStr("SHA256:abcdef"))
+
+        with pytest.raises(ValueError, match="fingerprint"):
+            loaded.resolve_github_private_key()
+
+    def test_rejects_an_incomplete_key_file_by_name(self, tmp_path: Any) -> None:
+        key_file = tmp_path / "app.pem"
+        key_file.write_text("-----BEGIN RSA PRIVATE KEY-----", encoding="utf-8")
+        loaded = Settings(_env_file=None, github_app_private_key_path=key_file)
+
+        with pytest.raises(ValueError, match=r"app.pem"):
+            loaded.resolve_github_private_key()
 
     def test_a_missing_file_names_the_path_it_tried(self, tmp_path: Any) -> None:
         """Inside a container this is nearly always a host path never mounted."""

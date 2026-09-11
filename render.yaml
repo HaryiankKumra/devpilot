@@ -65,6 +65,11 @@ services:
         value: gemini
       - key: DEVPILOT_GITHUB_MODE
         value: live
+      # Off by default in the code so a misconfigured deployment stays silent
+      # on other people's pull requests. This deployment is the real one, so
+      # turn it on; without it every review is stored but nothing is posted.
+      - key: DEVPILOT_POST_REVIEWS_TO_GITHUB
+        value: "true"
       # Same origin serves the frontend, so this is the only allowed origin.
       # Set to https://<your-service>.onrender.com once you know the name.
       - key: DEVPILOT_CORS_ORIGINS
